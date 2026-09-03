@@ -1,6 +1,10 @@
-use runtime_observability::{TraceContext, Observability};
+use async_trait::async_trait;
+use runtime_observability::{Observability, ReplayEvent};
 use runtime_auth::AgentIdentity;
-use runtime_policy::PolicyEngine;
+use runtime_policy::{PolicyEngine, CapabilitySet};
+use runtime_interaction::{
+    InteractionAdapter, AdapterDescriptor, AdapterKind, AdapterParams, AdapterResult, TaskInfo
+};
 
 pub struct HttpAdapter {
     client: runtime_network::HttpClient,
@@ -12,28 +16,54 @@ impl HttpAdapter {
     pub fn new(observability: std::sync::Arc<dyn Observability>, policy: std::sync::Arc<PolicyEngine>) -> Self {
         Self { client: runtime_network::HttpClient::new(), observability, policy }
     }
-    pub async fn execute(&self, agent: &AgentIdentity, action: &str, url: &str) -> String {
-        // CF-1 FIX: enforce policy BEFORE any network call
-        let decision = self.policy.check(agent, action);
+}
+
+#[async_trait]
+impl InteractionAdapter for HttpAdapter {
+    fn descriptor(&self) -> AdapterDescriptor {
+        AdapterDescriptor { kind: AdapterKind::Http, handles: vec!["http.get".into()] }
+    }
+
+    async fn execute(
+        &self,
+        agent: &AgentIdentity,
+        caps: &CapabilitySet,
+        ctx: &TaskInfo,
+        params: &AdapterParams,
+    ) -> AdapterResult {
+        let url = match params {
+            AdapterParams::Http { url, .. } => url.clone(),
+        };
+        // Policy check with capability set (CF-1 + CF-2)
+        let decision = self.policy.check_with_caps(agent, caps, "http.get");
         match decision {
             runtime_policy::Decision::Deny { reason } => {
-                self.observability.log_structured(
-                    runtime_observability::LogLevel::Warn,
-                    "http_adapter_denied",
-                    &TraceContext::new(uuid::Uuid::nil(), None),
-                    &[("action", action), ("reason", &reason)],
-                );
-                return format!("DENIED: {}", reason);
+                let event = ReplayEvent {
+                    sequence: 0,
+                    event_type: "policy_denied".into(),
+                    task_id: ctx.task_id,
+                    agent_id: agent.agent_id.0,
+                    result_summary: reason.clone(),
+                    timestamp: chrono::Utc::now(),
+                };
+                let replay_seq = self.observability.record_replay(event);
+                self.observability.metric("policy_denied", 1.0, &[("action", "http.get")]);
+                AdapterResult::Denied { reason, replay_sequence: replay_seq }
             }
-            runtime_policy::Decision::Allow => {},
+            runtime_policy::Decision::Allow => {
+                let res = self.client.get(&url).await.unwrap_or_default();
+                let event = ReplayEvent {
+                    sequence: 0,
+                    event_type: "http_executed".into(),
+                    task_id: ctx.task_id,
+                    agent_id: agent.agent_id.0,
+                    result_summary: "success".into(),
+                    timestamp: chrono::Utc::now(),
+                };
+                let replay_seq = self.observability.record_replay(event);
+                self.observability.metric("http_executed", 1.0, &[("action", "http.get")]);
+                AdapterResult::Success { response: res, replay_sequence: replay_seq }
+            }
         }
-        let res = self.client.get(url).await.unwrap_or_default();
-        self.observability.log_structured(
-            runtime_observability::LogLevel::Info,
-            "http_adapter_executed",
-            &TraceContext::new(uuid::Uuid::nil(), None),
-            &[("action", action), ("url", url)],
-        );
-        res
     }
 }

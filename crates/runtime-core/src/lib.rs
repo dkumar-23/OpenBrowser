@@ -88,7 +88,7 @@ impl RuntimeKernel {
     }
 
     /// Record a replay event for determinism.
-    pub fn record_replay(&self, event: ReplayEvent) {
-        self.observability.record_replay(event);
+    pub fn record_replay(&self, event: ReplayEvent) -> u64 {
+        self.observability.record_replay(event)
     }
 }

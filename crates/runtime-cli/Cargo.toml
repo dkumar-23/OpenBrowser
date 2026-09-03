@@ -10,4 +10,6 @@ runtime-auth = { path = "../runtime-auth" }
 runtime-policy = { path = "../runtime-policy" }
 runtime-adapters-http = { path = "../runtime-adapters-http" }
 runtime-observability = { path = "../runtime-observability" }
+runtime-interaction = { path = "../runtime-interaction" }
+runtime-sandbox = { path = "../runtime-sandbox" }
 tokio = { workspace = true }

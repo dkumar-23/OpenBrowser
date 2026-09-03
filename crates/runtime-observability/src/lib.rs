@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use metrics;
 
 /// Every important operation carries these IDs — fulfills observability requirement.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
@@ -43,7 +44,7 @@ pub trait Observability: Send + Sync + std::fmt::Debug {
     fn log_structured(&self, level: LogLevel, event: &str, ctx: &TraceContext, kv: &[(&str, &str)]);
     fn trace_span(&self, span: &str, ctx: &TraceContext);
     fn metric(&self, name: &str, value: f64, kv: &[(&str, &str)]);
-    fn record_replay(&self, event: ReplayEvent);
+    fn record_replay(&self, event: ReplayEvent) -> u64;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,24 +121,29 @@ impl Observability for TraceObservability {
 
     // CF-5 FIX: metric() now increments a counter via the metrics crate.
     fn metric(&self, name: &str, value: f64, _kv: &[(&str, &str)]) {
-        // CF-5 FIX: emit as structured trace field (metric subsystem stub)
-        tracing::info!(metric_name = %name, metric_value = %value, "metric_recorded");
+        // CF-5 FIX: emit metric via metrics crate counter
+        let owned = name.to_string();
+        metrics::counter!(owned).increment(value as u64);
     }
 
     // CF-3 FIX: record_replay now writes to JSONL file.
-    fn record_replay(&self, event: ReplayEvent) {
+    fn record_replay(&self, event: ReplayEvent) -> u64 {
         tracing::debug!(
-            replay_sequence = event.sequence,
             replay_type = %event.event_type,
             task_id = %event.task_id,
             agent_id = %event.agent_id,
         );
         if let Some(ref writer) = self.replay_writer {
-            let mut e = event.clone();
-            e.sequence = writer.next_seq();
+            // CF-3 FIX: writer is single sequence source — call next_seq() ONCE
+            let seq = writer.next_seq();
+            let mut e = event;
+            e.sequence = seq;
             if let Err(err) = writer.write(&e) {
                 tracing::warn!(replay_write_error = %err, "failed to write replay event");
             }
+            seq
+        } else {
+            0
         }
     }
 }

@@ -9,6 +9,7 @@ members = [
     "crates/runtime-network",
     "crates/runtime-adapters-http",
     "crates/runtime-cli",
+    "crates/runtime-interaction",
 ]
 
 [workspace.package]

@@ -64,7 +64,7 @@ impl PolicyEngine {
     /// Check if the given agent is authorized for the given action.
     /// Consults allow_list AND validates delegation chain expiration.
     pub fn check(&self, agent: &runtime_auth::AgentIdentity, action: &str) -> Decision {
-        // CF-2 FIX: traverse delegation chain for expiration + capability check
+        // CF-2 FIX: traverse delegation chain for expiration + allow_list check
         for link in &agent.delegation_chain.links {
             // Check expiration on each delegation link
             if let Some(expires) = link.expires_at {
@@ -82,6 +82,20 @@ impl PolicyEngine {
             Decision::Deny {
                 reason: format!("agent {:?} lacks capability: {}", agent.agent_id, action),
             }
+        }
+    }
+
+    pub fn check_with_caps(&self, agent: &runtime_auth::AgentIdentity, caps: &CapabilitySet, action: &str) -> Decision {
+        let base = self.check(agent, action);
+        match base {
+            Decision::Allow => {
+                if caps.has(action) {
+                    Decision::Allow
+                } else {
+                    Decision::Deny { reason: "capability missing in agent CapabilitySet".into() }
+                }
+            }
+            other => other,
         }
     }
 }

@@ -2,7 +2,7 @@
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use crate::{TraceContext, LogLevel, ReplayEvent, Observability, TraceObservability};
+    use runtime_observability::{TraceContext, LogLevel, ReplayEvent, Observability, TraceObservability};
     use uuid::Uuid;
 
     #[test]
@@ -30,6 +30,7 @@ mod tests {
             task_id: Uuid::new_v4(),
             agent_id: Uuid::new_v4(),
             result_summary: "allow".to_string(),
+            timestamp: chrono::Utc::now(),
         };
         let json = serde_json::to_string(&e).unwrap();
         assert!(json.contains("\"sequence\":1"));
@@ -37,17 +38,18 @@ mod tests {
 
     #[test]
     fn observability_is_object_safe() {
-        let obs: Arc<dyn Observability> = Arc::new(TraceObservability);
+        let obs: Arc<dyn Observability> = Arc::new(TraceObservability::default());
         let ctx = TraceContext::new(Uuid::new_v4(), None);
         obs.log_structured(LogLevel::Info, "test", &ctx, &[]);
         obs.trace_span("test_span", &ctx);
         obs.metric("test_metric", 1.0, &[]);
-        obs.record_replay(ReplayEvent {
+        let _ = obs.record_replay(ReplayEvent {
             sequence: 0,
             event_type: "test".to_string(),
             task_id: ctx.task_id,
             agent_id: ctx.agent_id,
             result_summary: "ok".to_string(),
+            timestamp: chrono::Utc::now(),
         });
     }
 }
