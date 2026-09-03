@@ -1,0 +1,15 @@
+[package]
+name = "runtime-adapters-http"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+runtime-core = { path = "../runtime-core" }
+runtime-network = { path = "../runtime-network" }
+runtime-auth = { path = "../runtime-auth" }
+runtime-policy = { path = "../runtime-policy" }
+runtime-observability = { path = "../runtime-observability" }
+tokio-util = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }

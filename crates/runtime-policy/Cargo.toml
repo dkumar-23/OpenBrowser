@@ -1,0 +1,11 @@
+[package]
+name = "runtime-policy"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+runtime-observability = { path = "../runtime-observability" }
+runtime-auth = { path = "../runtime-auth" }
+serde = { workspace = true }
+chrono = { workspace = true }

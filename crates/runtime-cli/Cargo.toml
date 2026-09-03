@@ -1,0 +1,13 @@
+[package]
+name = "runtime-cli"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+runtime-core = { path = "../runtime-core" }
+runtime-auth = { path = "../runtime-auth" }
+runtime-policy = { path = "../runtime-policy" }
+runtime-adapters-http = { path = "../runtime-adapters-http" }
+runtime-observability = { path = "../runtime-observability" }
+tokio = { workspace = true }

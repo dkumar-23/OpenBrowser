@@ -1,0 +1,62 @@
+{
+  "project": "OpenBrowser",
+  "ontology": "agent-native-runtime",
+  "entities": [
+    {"id":"Vision","label":"Agent-Native Web Runtime","type":"goal","notes":"Machine-interaction substrate, browser is compatibility mechanism"},
+    {"id":"Phase1","label":"Runtime Kernel","type":"phase","status":"in-progress","notes":"90% built, 10% critical flaws found — policy bypass, replay stub, metrics stub, WorkerPool empty"},
+    {"id":"Phase2","label":"Web Compatibility","type":"phase","status":"blocked","depends_on":"Phase1"},
+    {"id":"Phase3","label":"Agent Interface","type":"phase","status":"blocked","depends_on":"Phase2"},
+    {"id":"Phase4","label":"Security Hardening","type":"phase","status":"blocked","depends_on":"Phase3"},
+    {"id":"Phase5","label":"Scale","type":"phase","status":"blocked","depends_on":"Phase4"},
+    {"id":"Phase6","label":"Advanced Browser","type":"phase","status":"blocked","depends_on":"Phase5"},
+    {"id":"CandidateC","label":"Hybrid Design","type":"design","status":"accepted","notes":"Capability-first entry, layered replaceable internals"},
+    {"id":"TraceContext","label":"Trace IDs","type":"observability","status":"implemented","notes":"task_id, agent_id, delegation_id, request_id — all implemented in runtime-observability"},
+    {"id":"Scheduler","label":"Task Scheduler","type":"concurrency","status":"implemented","notes":"Bounded mpsc queue, backpressure via Semaphore, cancellation. 3 tests passing."},
+    {"id":"TaskContext","label":"Task Context","type":"core","status":"implemented","notes":"Carries trace, quota, cancel, policy. Not yet submitted to scheduler in CLI."},
+    {"id":"RuntimeKernel","label":"Runtime Kernel","type":"core","status":"implemented","notes":"Wires scheduler, workers, observability, policy. check_capability() exists but adapter bypasses it."},
+    {"id":"HttpAdapter","label":"HTTP Adapter","type":"adapter","status":"implemented-with-flaw","notes":"CRITICAL FLAW: policy Arc stored but never called. Network call always proceeds. Must fix."},
+    {"id":"PolicyEngine","label":"Policy Engine","type":"security","status":"partially-implemented","notes":"Allow-list check exists but does not consult agent CapabilitySet. Delegation chain not inspected."},
+    {"id":"AgentIdentity","label":"Agent Identity","type":"identity","status":"implemented","notes":"AgentId, HumanId, DelegationChain, AuthHandle (opaque). CredentialBroker stub."},
+    {"id":"Capability","label":"Capability-Based Access","type":"security","status":"implemented","notes":"Runtime enforces, not LLM. CapabilitySet with scope/expiration."},
+    {"id":"WorkerPool","label":"Worker Pool","type":"concurrency","status":"stub","notes":"CRITICAL: empty struct. tokio::spawn only. No per-worker state, no quota enforcement, no independent cancellation."},
+    {"id":"InteractionAdapter","label":"Interaction Adapter Trait","type":"trait","status":"not-implemented","notes":"Required for Phase 3. Adapter selection by capability, not agent. Not yet created."},
+    {"id":"ReplayWriter","label":"Replay Writer","type":"observability","status":"stub","notes":"CRITICAL: only tracing::debug! stub. No JSONL file. No deterministic sequence."},
+    {"id":"MetricsSystem","label":"Metrics","type":"observability","status":"stub","notes":"metric() is no-op. No counter/gauge fire."},
+    {"id":"JsEngine","label":"Abstract JS Engine","type":"trait","notes":"Planned Phase 2. V8 initial impl behind trait."}
+  ],
+  "relations": [
+    {"from":"Vision","to":"Phase1","type":"requires"},
+    {"from":"Phase1","to":"Phase2","type":"precedes"},
+    {"from":"CandidateC","to":"Phase1","type":"defines"},
+    {"from":"TraceContext","to":"Phase1","type":"implemented_in"},
+    {"from":"Scheduler","to":"Phase1","type":"implemented_in"},
+    {"from":"TaskContext","to":"Phase1","type":"implemented_in"},
+    {"from":"RuntimeKernel","to":"Phase1","type":"implemented_in"},
+    {"from":"HttpAdapter","to":"Phase1","type":"implemented_in","notes":"HAS CRITICAL FLAW — policy bypass"},
+    {"from":"PolicyEngine","to":"Phase1","type":"implemented_in","notes":"PARTIAL — allow-list only, no CapabilitySet"},
+    {"from":"AgentIdentity","to":"Phase1","type":"implemented_in"},
+    {"from":"Capability","to":"Phase1","type":"implemented_in"},
+    {"from":"WorkerPool","to":"Phase1","type":"implemented_in","notes":"STUB ONLY — needs quota enforcement"},
+    {"from":"InteractionAdapter","to":"Phase3","type":"defines"},
+    {"from":"JsEngine","to":"Phase2","type":"implemented_in"},
+    {"from":"ReplayWriter","to":"Phase4","type":"planned","notes":"Currently stub only"},
+    {"from":"MetricsSystem","to":"Phase1","type":"planned","notes":"Currently no-op"}
+  ],
+  "critical_flaws_found": [
+    {"id":"CF-1","severity":"critical","title":"Policy enforcement bypassed in HttpAdapter","file":"crates/runtime-adapters-http/src/lib.rs","line":"execute() method","fix":"Call policy.check() BEFORE self.client.get(); return Denied result on policy denial"},
+    {"id":"CF-2","severity":"high","title":"PolicyEngine.check ignores agent CapabilitySet and delegation chain","file":"crates/runtime-policy/src/lib.rs","fix":"check() must consult agent.capability_set; delegation chain must be traversed"},
+    {"id":"CF-3","severity":"high","title":"ReplayWriter is a no-op stub","file":"crates/runtime-observability/src/lib.rs","fix":"Implement JSONL file writer with monotonic sequence IDs"},
+    {"id":"CF-4","severity":"high","title":"WorkerPool has no per-worker state or quota enforcement","file":"crates/runtime-core/src/worker.rs","fix":"Add WorkerContext with ResourceQuota; enforce before task spawn"},
+    {"id":"CF-5","severity":"medium","title":"Metrics metric() is a no-op","file":"crates/runtime-observability/src/lib.rs","fix":"Implement counter/gauge via metrics crate macros"},
+    {"id":"CF-6","severity":"medium","title":"InteractionAdapter trait not yet defined","file":"not yet created","fix":"Create runtime-interaction crate with trait; plug HttpAdapter into it"},
+    {"id":"CF-7","severity":"medium","title":"TaskContext not submitted to scheduler in CLI","file":"crates/runtime-cli/src/main.rs","fix":"Use kernel.scheduler.submit() with TaskContext instead of direct adapter call"},
+    {"id":"CF-8","severity":"low","title":"Graph stale — missing Scheduler, TaskContext, RuntimeKernel entities","file":".graphify/graph.json","fix":"Refresh graph after CF fixes"}
+  ],
+  "session_state": {
+    "current": "Session 3 (2026-09-04). CF-1, CF-2, CF-3, CF-5 fixed. Policy enforcement now works. CF-4 (WorkerPool), CF-6 (InteractionAdapter), CF-7 (CLI scheduler) remain. Integration tests pending.",
+    "next_session_target": "Fix CF-4 (WorkerPool quota), CF-6 (InteractionAdapter trait), CF-7 (CLI via scheduler). Write integration tests. Then validator + architect sign-off. Then Phase 2.",
+    "design_contract_ref": "architect-output.md + architect-synthesis/synthesis.md",
+    "fix_design_ref": "swarm-output/wave3-policy-fix-design.md",
+    "resumable_artifacts":["PHASE-TRACKER.md","SESSION-LOG.md","swarm-trace.md","swarm-output/","crates/","architect-output.md",".graphify/graph.json"]
+  }
+}

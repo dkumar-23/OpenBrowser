@@ -1,0 +1,11 @@
+[package]
+name = "runtime-auth"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+runtime-observability = { path = "../runtime-observability" }
+uuid = { workspace = true }
+serde = { workspace = true }
+chrono = { workspace = true }
