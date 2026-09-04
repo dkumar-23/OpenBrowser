@@ -227,7 +227,7 @@ impl HttpClient {
         }
 
         async move {
-            tracing::info!(method = %method.as_str(), url = %url, "http request start");
+            tracing::info!(method = %method.as_str(), url = %url, ua = ?req.user_agent_override, "http request start");
 
             let mut builder = self.inner.request(reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET), &url);
             if let Some(body) = req.body {
@@ -246,6 +246,10 @@ impl HttpClient {
             }
             if let Some(timeout) = req.timeout {
                 builder = builder.timeout(timeout);
+            }
+            // Dynamic User-Agent override per request (agentic: desktop/mobile/stealth)
+            if let Some(ua) = &req.user_agent_override {
+                builder = builder.header("User-Agent", ua.as_str());
             }
 
             let response = builder
@@ -342,6 +346,7 @@ pub struct Request {
     pub body: Option<Vec<u8>>,
     pub content_type: Option<String>,
     pub timeout: Option<Duration>,
+    pub user_agent_override: Option<String>,
 }
 
 impl Request {
@@ -354,6 +359,7 @@ impl Request {
             body: None,
             content_type: None,
             timeout: None,
+            user_agent_override: None,
         }
     }
 
@@ -366,6 +372,7 @@ impl Request {
             body: None,
             content_type: None,
             timeout: None,
+            user_agent_override: None,
         }
     }
 
@@ -397,6 +404,13 @@ impl Request {
     /// Override the per-request timeout.
     pub fn timeout(mut self, t: Duration) -> Self {
         self.timeout = Some(t);
+        self
+    }
+
+    /// Per-request User-Agent override.
+    /// Lets the agent choose browser identity (desktop/mobile/stealth) per task.
+    pub fn user_agent(mut self, ua: impl Into<String>) -> Self {
+        self.user_agent_override = Some(ua.into());
         self
     }
 }

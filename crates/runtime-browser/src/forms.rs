@@ -40,6 +40,7 @@ pub(super) async fn do_submit_form(
         body: Some(fields_str.into_bytes()),
         content_type: Some("application/x-www-form-urlencoded".into()),
         timeout: _options.timeout,
+        user_agent_override: None,
     };
     client.execute(req).await
         .map_err(|e| super::BrowserError::FormSubmission(e.to_string()))
