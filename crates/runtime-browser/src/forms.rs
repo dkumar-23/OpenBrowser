@@ -23,6 +23,28 @@ pub struct FormSubmitOptions {
     pub timeout: Option<Duration>,
 }
 
+pub(super) async fn do_submit_form(
+    client: &HttpClient,
+    form: &FormData,
+    _options: FormSubmitOptions,
+) -> Result<runtime_network::Response, super::BrowserError> {
+    use runtime_network::Request;
+    let mut fields_str = form.fields.iter()
+        .map(|(k, v)| format!("{}={}", k, v))
+        .collect::<Vec<_>>().join("&");
+    if fields_str.is_empty() { fields_str = String::new(); }
+    let req = Request {
+        method: form.method.clone(),
+        url: form.action.clone(),
+        headers: vec![("Content-Type".to_string(), "application/x-www-form-urlencoded".to_string())],
+        body: Some(fields_str.into_bytes()),
+        content_type: Some("application/x-www-form-urlencoded".into()),
+        timeout: _options.timeout,
+    };
+    client.execute(req).await
+        .map_err(|e| super::BrowserError::FormSubmission(e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -4,11 +4,17 @@ use tokio::time::{sleep, Duration as TD};
 
 #[derive(Debug, Clone)]
 pub struct TimerHandle { cancelled: std::sync::Arc<std::sync::atomic::AtomicBool> }
-impl TimerHandle { pub fn cancel(&self) { self.cancelled.store(true, std::sync::atomic::Ordering::Relaxed); } }
+impl TimerHandle {
+    pub fn cancel(&self) { self.cancelled.store(true, std::sync::atomic::Ordering::Relaxed); }
+    pub fn is_cancelled(&self) -> bool { self.cancelled.load(std::sync::atomic::Ordering::Relaxed) }
+}
 
 #[derive(Debug, Clone)]
 pub struct IntervalHandle { cancelled: std::sync::Arc<std::sync::atomic::AtomicBool> }
-impl IntervalHandle { pub fn cancel(&self) { self.cancelled.store(true, std::sync::atomic::Ordering::Relaxed); } }
+impl IntervalHandle {
+    pub fn cancel(&self) { self.cancelled.store(true, std::sync::atomic::Ordering::Relaxed); }
+    pub fn is_cancelled(&self) -> bool { self.cancelled.load(std::sync::atomic::Ordering::Relaxed) }
+}
 
 pub fn set_timeout<F>(delay: Duration, callback: F) -> TimerHandle
 where F: FnOnce() + Send + 'static

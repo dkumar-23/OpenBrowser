@@ -63,6 +63,16 @@ impl Browser {
     pub async fn navigate(&self, url: &str) -> Result<NavigationResult, BrowserError> {
         navigate::do_navigate(&self.client, url).await
     }
+    pub async fn submit_form(
+        &self,
+        form_data: &FormData,
+        options: FormSubmitOptions,
+    ) -> Result<runtime_network::Response, BrowserError> {
+        forms::do_submit_form(&self.client, form_data, options).await
+    }
+    pub async fn fetch(&self, req: FetchRequest) -> Result<runtime_network::Response, BrowserError> {
+        fetch::do_fetch(&self.client, req).await.map_err(|e| BrowserError::Fetch(e.to_string()))
+    }
     pub fn set_timeout<F>(&self, delay: std::time::Duration, callback: F) -> TimerHandle
     where F: FnOnce() + Send + 'static,
     { timers::set_timeout(delay, callback) }
@@ -70,6 +80,7 @@ impl Browser {
     where F: Fn() + Send + Sync + 'static,
     { timers::set_interval(period, callback) }
     pub fn http_client(&self) -> &HttpClient { &self.client }
+    pub fn is_cancelled(&self) -> bool { false } // placeholder
 }
 
 #[cfg(test)]
