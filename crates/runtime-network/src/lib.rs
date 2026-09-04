@@ -50,7 +50,7 @@ impl Default for ClientBuilder {
             gzip: true,
             brotli: true,
             timeout: DEFAULT_TIMEOUT,
-            user_agent: Some(format!("runtime-network/{}", env!("CARGO_PKG_VERSION"))),
+            user_agent: Some("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36".to_string()),
             default_headers: HeaderMap::new(),
             accept_invalid_certs: false,
         }
