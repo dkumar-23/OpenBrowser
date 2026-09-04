@@ -1,2 +1,29 @@
 /target
 /Cargo.lock
+
+# Markdown files (only root README.md kept)
+*.md
+!/README.md
+
+# Graphify / trackers
+.graphify/
+.pi/
+swarm-*
+*.plan.md
+*.trace.md
+
+# Session / tracker artifacts
+SESSION-LOG.md
+PHASE-TRACKER.md
+BROWSED-REFERENCES.md
+CODING-STANDARDS.md
+
+# Output artifacts
+swarm-output/
+architect-output.md
+architect-sketch/
+architect-synthesis/
+context.md
+
+# Test reports (except kept intentionally)
+*.test-report.md
