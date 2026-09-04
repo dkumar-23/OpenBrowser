@@ -101,3 +101,5 @@ impl PolicyEngine {
 }
 
 impl Default for PolicyEngine { fn default() -> Self { Self::new() } }
+
+mod tests;

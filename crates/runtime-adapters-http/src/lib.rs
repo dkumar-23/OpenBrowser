@@ -67,3 +67,5 @@ impl InteractionAdapter for HttpAdapter {
         }
     }
 }
+
+mod tests;

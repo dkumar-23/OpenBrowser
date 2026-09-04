@@ -11,7 +11,9 @@ runtime-policy = { path = "../runtime-policy" }
 runtime-observability = { path = "../runtime-observability" }
 runtime-interaction = { path = "../runtime-interaction" }
 async-trait = { workspace = true }
-tokio-util = { workspace = true }
+tokio = { workspace = true }
+tempfile = "3.12"
+serde_json = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
