@@ -22,6 +22,11 @@ pub struct TaskContext {
     pub quota: ResourceQuota,
     pub cancel: CancellationToken,
     pub policy: Arc<PolicyEngine>,
+    /// Action name used by the kernel's executor to resolve an adapter via
+    /// the AdapterRegistry (preference order: HTTP > DOM > JS > MCP > Visual).
+    /// Replaces the previous direct-adapter-call pattern that bypassed
+    /// adapter selection.
+    pub action: Arc<String>,
 }
 
 impl TaskContext {
@@ -30,6 +35,19 @@ impl TaskContext {
         delegation_id: Option<Uuid>,
         quota: ResourceQuota,
         policy: Arc<PolicyEngine>,
+    ) -> Self {
+        Self::with_action(agent_id, delegation_id, quota, policy, "http.get")
+    }
+
+    /// Builder with explicit action — the action string is the contract between
+    /// the caller and the kernel's executor. The executor resolves it via the
+    /// adapter registry's preference-order selection.
+    pub fn with_action(
+        agent_id: Uuid,
+        delegation_id: Option<Uuid>,
+        quota: ResourceQuota,
+        policy: Arc<PolicyEngine>,
+        action: impl Into<String>,
     ) -> Self {
         let trace = Arc::new(TraceContext::new(
             agent_id,
@@ -43,6 +61,7 @@ impl TaskContext {
             quota,
             cancel: CancellationToken::new(),
             policy,
+            action: Arc::new(action.into()),
         }
     }
 }

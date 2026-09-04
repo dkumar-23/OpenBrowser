@@ -306,3 +306,4 @@ mod tests {
         assert!(called.load(Ordering::SeqCst));
     }
 }
+pub mod adapter;

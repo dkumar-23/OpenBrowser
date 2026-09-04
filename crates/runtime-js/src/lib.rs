@@ -298,3 +298,4 @@ mod tests {
         assert_eq!(cm.source(), "1 + 1");
     }
 }
+pub mod adapter;

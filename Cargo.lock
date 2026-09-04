@@ -1264,6 +1264,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "runtime-auth",
+ "runtime-interaction",
+ "runtime-observability",
+ "runtime-policy",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "runtime-auth"
 version = "0.1.0"
 dependencies = [
@@ -1294,10 +1310,12 @@ dependencies = [
  "runtime-auth",
  "runtime-core",
  "runtime-interaction",
+ "runtime-mcp",
  "runtime-observability",
  "runtime-policy",
  "runtime-sandbox",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -1319,12 +1337,20 @@ dependencies = [
 name = "runtime-dom"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "chrono",
  "once_cell",
  "regex",
+ "runtime-auth",
+ "runtime-interaction",
+ "runtime-observability",
+ "runtime-policy",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1346,11 +1372,35 @@ dependencies = [
 name = "runtime-js"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
+ "runtime-auth",
+ "runtime-interaction",
+ "runtime-observability",
+ "runtime-policy",
  "rusty_v8",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "runtime-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "runtime-agent",
+ "runtime-auth",
+ "runtime-interaction",
+ "runtime-observability",
+ "runtime-policy",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "uuid",

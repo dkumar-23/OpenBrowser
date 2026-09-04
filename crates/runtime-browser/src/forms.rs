@@ -36,11 +36,17 @@ pub(super) async fn do_submit_form(
     let req = Request {
         method: form.method.clone(),
         url: form.action.clone(),
-        headers: vec![("Content-Type".to_string(), "application/x-www-form-urlencoded".to_string())],
+        headers: vec![
+            ("Content-Type".to_string(), "application/x-www-form-urlencoded".to_string()),
+            ("Accept".to_string(), "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".to_string()),
+            ("Accept-Encoding".to_string(), "gzip, deflate, br".to_string()),
+            ("Accept-Language".to_string(), "en-US,en;q=0.9".to_string()),
+            ("Referer".to_string(), "https://www.google.com/".to_string()),
+        ],
         body: Some(fields_str.into_bytes()),
         content_type: Some("application/x-www-form-urlencoded".into()),
         timeout: _options.timeout,
-        user_agent_override: None,
+        user_agent_override: Some("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36".into()),
     };
     client.execute(req).await
         .map_err(|e| super::BrowserError::FormSubmission(e.to_string()))
