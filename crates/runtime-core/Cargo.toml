@@ -14,3 +14,5 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 runtime-interaction = { path = "../runtime-interaction" }
 anyhow = { workspace = true }
+serde = { workspace = true }
+chrono = { workspace = true }

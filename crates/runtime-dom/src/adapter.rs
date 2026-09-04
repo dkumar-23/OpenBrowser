@@ -246,7 +246,7 @@ mod tests {
         let obs = Arc::new(runtime_observability::TraceObservability::without_replay());
         let policy = Arc::new(runtime_policy::PolicyEngine::new());
         let adapter = DomAdapter::new(obs, policy);
-        let params = AdapterParams::Http { url: "https://example.com".into(), method: None };
+        let params = AdapterParams::Http {  url: "https://example.com".into(), method: None, body: None, headers: Default::default() };
         let result = adapter.execute(&agent, &caps, &info, &params).await;
         assert!(matches!(result, AdapterResult::Error { .. }));
     }

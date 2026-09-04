@@ -209,7 +209,7 @@ impl SemanticCapability for SearchWebCapability {
             "bing"   => format!("https://www.bing.com/search?q={}", urlencoding_simple(query)),
             _        => format!("https://duckduckgo.com/?q={}", urlencoding_simple(query)),
         };
-        Ok(AdapterParams::Http { url, method: Some("GET".into()) })
+        Ok(AdapterParams::Http {  url, method: Some("GET".into()), body: None, headers: Default::default() })
     }
 
     async fn execute(
@@ -331,7 +331,7 @@ impl SemanticCapability for AuthenticateCapability {
             .and_then(|v| v.as_str())
             .ok_or_else(|| CapabilityError::MissingField("service".into()))?;
         let url = format!("https://{}/auth", service);
-        Ok(AdapterParams::Http { url, method: Some("POST".into()) })
+        Ok(AdapterParams::Http {  url, method: Some("POST".into()), body: None, headers: Default::default() })
     }
     async fn execute(
         &self, agent: AgentIdentity, caps: CapabilitySet, info: TaskInfo,
@@ -391,7 +391,7 @@ impl AuthenticateCapability {
             "token_id": token_id,
             "note": "authenticate executed with broker",
             "params_url": match params {
-                AdapterParams::Http { ref url, .. } => url.clone(),
+                AdapterParams::Http { ref url, body, headers, .. } => url.clone(),
                 _ => String::new(),
             },
         });
@@ -412,7 +412,7 @@ impl SemanticCapability for SubmitFormCapability {
     }
     fn build_params(&self, input: &serde_json::Value) -> Result<AdapterParams, CapabilityError> {
         let url = input.get("url").and_then(|v| v.as_str()).ok_or_else(|| CapabilityError::MissingField("url".into()))?.to_string();
-        Ok(AdapterParams::Http { url, method: Some("POST".into()) })
+        Ok(AdapterParams::Http {  url, method: Some("POST".into()), body: None, headers: Default::default() })
     }
     async fn execute(
         &self, agent: AgentIdentity, caps: CapabilitySet, info: TaskInfo,
@@ -447,7 +447,7 @@ impl SemanticCapability for PurchaseCapability {
     }
     fn build_params(&self, input: &serde_json::Value) -> Result<AdapterParams, CapabilityError> {
         let url = input.get("url").and_then(|v| v.as_str()).ok_or_else(|| CapabilityError::MissingField("url".into()))?.to_string();
-        Ok(AdapterParams::Http { url, method: Some("POST".into()) })
+        Ok(AdapterParams::Http {  url, method: Some("POST".into()), body: None, headers: Default::default() })
     }
     async fn execute(
         &self, agent: AgentIdentity, caps: CapabilitySet, info: TaskInfo,
@@ -589,7 +589,7 @@ mod tests {
         let input = serde_json::json!({"query":"rust programming","engine":"duckduckgo"});
         let params = cap.build_params(&input).unwrap();
         match params {
-            AdapterParams::Http { url, method } => {
+            AdapterParams::Http {  url, method, body: None, headers: Default::default() } => {
                 assert!(url.contains("duckduckgo"));
                 assert!(url.contains("rust%20programming") || url.contains("rust programming"));
                 assert_eq!(method.as_deref(), Some("GET"));

@@ -1,0 +1,25 @@
+[package]
+name = "runtime-contract-tests"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+runtime-core = { path = "../runtime-core" }
+runtime-auth = { path = "../runtime-auth" }
+runtime-interaction = { path = "../runtime-interaction" }
+runtime-policy = { path = "../runtime-policy" }
+runtime-observability = { path = "../runtime-observability" }
+runtime-sandbox = { path = "../runtime-sandbox" }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

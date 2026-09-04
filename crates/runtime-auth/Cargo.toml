@@ -9,3 +9,4 @@ runtime-observability = { path = "../runtime-observability" }
 uuid = { workspace = true }
 serde = { workspace = true }
 chrono = { workspace = true }
+rand = "0.8"

@@ -34,7 +34,7 @@ mod tests {
     }
 
     fn make_params() -> AdapterParams {
-        AdapterParams::Http { url: "http://example.com".into(), method: None }
+        AdapterParams::Http {  url: "http://example.com".into(), method: None, body: None, headers: Default::default() }
     }
 
     // -------------------------------------------------------------------------

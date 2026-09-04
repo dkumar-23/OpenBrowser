@@ -4,6 +4,7 @@
 // Replay events written to JSONL on every call (CF-3). Metrics incremented on every call (CF-5).
 
 use async_trait::async_trait;
+use runtime_network::{Method, Request};
 use runtime_observability::{Observability, ReplayEvent};
 use runtime_auth::AgentIdentity;
 use runtime_policy::{PolicyEngine, CapabilitySet};
@@ -67,7 +68,7 @@ impl InteractionAdapter for HttpAdapter {
     ) -> AdapterResult {
         // CF-1: Extract action from params for policy check
         let (url, action) = match params {
-            AdapterParams::Http { url, method: Some(m) } if m == "POST" => {
+            AdapterParams::Http { url, method: Some(m), .. } if m == "POST" => {
                 (url.clone(), "http.post")
             }
             AdapterParams::Http { url, .. } => (url.clone(), "http.get"),
@@ -96,11 +97,26 @@ impl InteractionAdapter for HttpAdapter {
                 AdapterResult::Denied { reason, replay_sequence: replay_seq }
             }
             runtime_policy::Decision::Allow => {
-                // Policy allowed: perform HTTP request
-                let result = self.client.get(&url).await;
+                // G10 FIX: Policy allowed — perform HTTP request with correct method.
+                // Previously this always called client.get() regardless of method.
+                let method = match params {
+                    AdapterParams::Http { method: Some(ref m), .. } if m == "POST" => Method::Post,
+                    _ => Method::Get,
+                };
+
+                let req = match method {
+                    Method::Post => Request::post(&url)
+                        .header("Content-Type", "application/json")
+                        .header("Accept", "*/*")
+                        .text("{}"),
+                    _ => Request::get(&url),
+                };
+
+                let result = self.client.execute(req).await;
 
                 match result {
-                    Ok(body) => {
+                    Ok(resp) => {
+                        let body_str = resp.text().unwrap_or_else(|_| "".into());
                         let event = ReplayEvent {
                             sequence: 0,
                             event_type: "http_executed".into(),
@@ -111,7 +127,7 @@ impl InteractionAdapter for HttpAdapter {
                         };
                         let replay_seq = self.observability.record_replay(event);
                         self.observability.metric("http_executed", 1.0, &[("action", action)]);
-                        AdapterResult::Success { response: body, replay_sequence: replay_seq }
+                        AdapterResult::Success { response: body_str, replay_sequence: replay_seq }
                     }
                     Err(e) => {
                         let event = ReplayEvent {
@@ -167,10 +183,9 @@ mod tests {
 
         let adapter = HttpAdapter::new(obs.clone(), policy);
 
-        let params = AdapterParams::Http {
+        let params = AdapterParams::Http { 
             url: "https://example.com".into(),
-            method: None,
-        };
+            method: None, body: None, headers: Default::default() };
 
         let result = adapter.execute(&identity, &caps, &info, &params).await;
 
@@ -198,10 +213,9 @@ mod tests {
 
         let adapter = HttpAdapter::new(obs.clone(), policy);
 
-        let params = AdapterParams::Http {
+        let params = AdapterParams::Http { 
             url: "https://example.com".into(),
-            method: None,
-        };
+            method: None, body: None, headers: Default::default() };
 
         let result = adapter.execute(&identity, &caps, &info, &params).await;
         // Without mockito, real network call may fail — but we verify policy is checked

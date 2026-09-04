@@ -1,16 +1,18 @@
 use std::sync::{Arc, RwLock};
 use uuid::Uuid;
 use tokio_util::sync::CancellationToken;
-use runtime_observability::{TraceContext, Observability, ReplayEvent};
+use runtime_observability::{TraceContext, Observability, ReplayEvent, LifecycleEvent};
 use runtime_sandbox::ResourceQuota;
 use runtime_policy::{PolicyEngine, Decision};
 use runtime_auth::AgentIdentity;
 
 pub mod scheduler;
 pub mod worker;
+pub mod execution;
 
 pub use scheduler::{Scheduler, SchedulerMetrics};
 pub use worker::WorkerPool;
+pub use execution::{ExecutionState, ExecutionRecord};
 
 /// Every task carries full context through the runtime — trace/observability requirement.
 #[derive(Clone, Debug)]
@@ -27,6 +29,8 @@ pub struct TaskContext {
     /// Replaces the previous direct-adapter-call pattern that bypassed
     /// adapter selection.
     pub action: Arc<String>,
+    /// Optional deadline in milliseconds from submission. G5.
+    pub deadline: Option<u64>,
 }
 
 impl TaskContext {
@@ -49,6 +53,17 @@ impl TaskContext {
         policy: Arc<PolicyEngine>,
         action: impl Into<String>,
     ) -> Self {
+        Self::with_deadline(agent_id, delegation_id, quota, policy, action, None)
+    }
+
+    pub fn with_deadline(
+        agent_id: Uuid,
+        delegation_id: Option<Uuid>,
+        quota: ResourceQuota,
+        policy: Arc<PolicyEngine>,
+        action: impl Into<String>,
+        deadline: Option<u64>,
+    ) -> Self {
         let trace = Arc::new(TraceContext::new(
             agent_id,
             delegation_id,
@@ -62,6 +77,7 @@ impl TaskContext {
             cancel: CancellationToken::new(),
             policy,
             action: Arc::new(action.into()),
+            deadline,
         }
     }
 }
@@ -77,7 +93,7 @@ pub struct RuntimeKernel {
 impl RuntimeKernel {
     pub fn new(policy: Arc<PolicyEngine>, observability: Arc<dyn Observability>) -> Self {
         Self {
-            scheduler: Scheduler::new(1000), // max 1000 queued tasks
+            scheduler: Scheduler::new(1000, 100), // max 1000 queued, 100 concurrent
             workers: Arc::new(RwLock::new(WorkerPool::new())),
             observability,
             policy,

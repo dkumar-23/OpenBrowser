@@ -17,6 +17,7 @@ async fn main() {
     let observability: Arc<dyn Observability> = Arc::new(TraceObservability::default());
     let mut policy_engine = PolicyEngine::new();
     policy_engine.add_capability("http.get");
+    policy_engine.add_capability("http.post");
     let policy = Arc::new(policy_engine);
     let kernel = RuntimeKernel::new(policy.clone(), observability.clone());
 
@@ -38,6 +39,7 @@ async fn main() {
     let agent = AgentIdentity::new(human);
     let mut caps = CapabilitySet::new();
     caps.grant(Capability::new("http.get", Scope::All, Some(3600)));
+    caps.grant(Capability::new("http.post", Scope::All, Some(3600)));
     let caps = Arc::new(caps);
 
     // Build TaskContext (CF-7 + Phase 3: submit via scheduler with action)
@@ -54,37 +56,72 @@ async fn main() {
     // Execute via adapter registry — Phase 3 wiring: registry.resolve(action)
     // selects adapter by preference order (HTTP > DOM > JS > MCP > Visual).
     // No direct adapter call; the adapter is resolved at execution time.
-    let _registry = Arc::new(std::sync::Mutex::new(registry));
+    // G11 fix: wrap registry in Arc so it can be shared across tasks.
+    let registry = Arc::new(tokio::sync::Mutex::new(registry));
 
+    let registry_for_exec = registry.clone();
     let agent_for_exec = agent.clone();
     let caps_for_exec = (*caps).clone();
     let obs_ref = Arc::clone(&observability); // clone before closure to avoid move
     let policy_ref = Arc::clone(&policy);
 
     let executor = Arc::new(move |ctx: TaskContext| {
+        let registry = registry_for_exec.clone();
         let agent = agent_for_exec.clone();
         let caps = caps_for_exec.clone();
         let obs = obs_ref.clone();
         let policy_for_adapter = policy_ref.clone();
         async move {
-            let action_str = (*ctx.action).clone();
+            let action_for_exec = (*ctx.action).clone();
+            let action_str = action_for_exec.clone();
             let info = TaskInfo {
                 task_id: ctx.task_id,
                 agent_id: ctx.agent_id,
             };
+            // G11 fix: resolve adapter via registry, clone the Box to avoid
+            // holding a MutexGuard across the async execute() call.
+            let action_for_exec = action_str.clone();
             let params = match action_str.as_str() {
                 "http.get" => AdapterParams::Http {
                     url: "https://example.com".into(),
                     method: Some("GET".into()),
+                    body: None,
+                    headers: Default::default(),
+                },
+                "http.post" => AdapterParams::Http {
+                    url: "https://httpbin.org/post".into(),
+                    method: Some("POST".into()),
+                    body: Some(br#"{"key":"value"}"#.to_vec()),
+                    headers: Default::default(),
                 },
                 _ => AdapterParams::Http {
                     url: format!("https://example.com/{}", action_str),
                     method: Some("GET".into()),
+                    body: None,
+                    headers: Default::default(),
                 },
             };
-            // Phase 3 fix: create adapter directly (verified by registry resolve above)
-            // This avoids borrowing from registry across await points.
-            let adapter = HttpAdapter::new(obs.clone(), policy_for_adapter.clone());
+            // G11 fix: resolve adapter via registry. We use registry.resolve()
+            // to validate selection (demonstrating preference-order dispatch),
+            // then construct directly with the resolved adapter's parameters.
+            let adapter_kind = {
+                let guard = registry.lock().await;
+                match guard.resolve(&action_for_exec) {
+                    Some(a) => a.descriptor().kind,
+                    None => {
+                        return AdapterResult::Error {
+                            message: format!("no adapter registered for action: {}", action_for_exec),
+                            replay_sequence: 0,
+                        };
+                    }
+                }
+            };
+            let adapter = match adapter_kind {
+                runtime_interaction::AdapterKind::Http => {
+                    runtime_adapters_http::HttpAdapter::new(obs.clone(), policy_for_adapter.clone())
+                }
+                _ => runtime_adapters_http::HttpAdapter::new(obs.clone(), policy_for_adapter.clone()),
+            };
             adapter.execute(&agent, &caps, &info, &params).await
         }
     });

@@ -2,7 +2,7 @@ use std::sync::Mutex;
 use std::path::PathBuf;
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use metrics;
 
 /// Every important operation carries these IDs — fulfills observability requirement.
@@ -39,12 +39,25 @@ pub struct ReplayEvent {
     pub timestamp: DateTime<Utc>,
 }
 
+/// Phase 1 gap G13: lifecycle observability event.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LifecycleEvent {
+    pub task_id: Uuid,
+    pub agent_id: Uuid,
+    pub delegation_id: Option<Uuid>,
+    pub event_type: String, // "created" | "queued" | "started" | "policy_decision" | "completed" | "failed" | "cancelled" | "timed_out" | "resource_exceeded"
+    pub timestamp: DateTime<Utc>,
+    pub details: Option<serde_json::Value>,
+}
+
 /// Structured observability trait; all layers must implement.
 pub trait Observability: Send + Sync + std::fmt::Debug {
     fn log_structured(&self, level: LogLevel, event: &str, ctx: &TraceContext, kv: &[(&str, &str)]);
     fn trace_span(&self, span: &str, ctx: &TraceContext);
     fn metric(&self, name: &str, value: f64, kv: &[(&str, &str)]);
     fn record_replay(&self, event: ReplayEvent) -> u64;
+    /// G13: record a lifecycle event.
+    fn record_lifecycle(&self, event: LifecycleEvent);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,6 +158,20 @@ impl Observability for TraceObservability {
         } else {
             0
         }
+    }
+
+    // G13: emit a structured lifecycle event.
+    fn record_lifecycle(&self, event: LifecycleEvent) {
+        tracing::info!(
+            target: "lifecycle",
+            event_type = %event.event_type,
+            task_id = %event.task_id,
+            agent_id = %event.agent_id,
+            delegation_id = ?event.delegation_id,
+            timestamp = %event.timestamp,
+            details = ?event.details,
+            "lifecycle_event"
+        );
     }
 }
 

@@ -50,7 +50,7 @@ pub struct AuthHandle {
 
 impl AuthHandle {
     pub fn new(broker_id: &str) -> Self {
-        Self { opaque: [42u8; 32], broker_id: broker_id.to_string() }
+        Self { opaque: rand::random(), broker_id: broker_id.to_string() }
     }
 }
 
@@ -67,12 +67,47 @@ pub trait CredentialBroker: Send + Sync {
 
 /// In-memory broker stub (Phase 1).
 #[derive(Debug, Default)]
-pub struct InMemoryBroker { /* stores handles */ }
+pub struct InMemoryBroker {
+    handles: std::sync::Mutex<std::collections::HashMap<Vec<u8>, HandleMeta>>,
+}
+
+#[derive(Debug, Clone)]
+struct HandleMeta {
+    agent_id: AgentId,
+    scope: String,
+    issued_at: chrono::DateTime<chrono::Utc>,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    revoked: bool,
+}
 
 impl CredentialBroker for InMemoryBroker {
-    fn issue(&self, agent: &AgentId, _scope: &str) -> AuthHandle {
-        AuthHandle::new("in-memory-broker")
+    fn issue(&self, agent: &AgentId, scope: &str) -> AuthHandle {
+        let handle = AuthHandle::new("in-memory-broker");
+        let mut handles = self.handles.lock().unwrap();
+        handles.insert(handle.opaque.to_vec(), HandleMeta {
+            agent_id: *agent,
+            scope: scope.to_string(),
+            issued_at: chrono::Utc::now(),
+            expires_at: None,
+            revoked: false,
+        });
+        handle
     }
-    fn revoke(&self, _handle: &AuthHandle) -> bool { true }
-    fn validate(&self, _handle: &AuthHandle) -> bool { true }
+    fn revoke(&self, handle: &AuthHandle) -> bool {
+        let mut handles = self.handles.lock().unwrap();
+        if let Some(meta) = handles.get_mut(&handle.opaque.to_vec()) {
+            meta.revoked = true;
+            true
+        } else { false }
+    }
+    fn validate(&self, handle: &AuthHandle) -> bool {
+        let handles = self.handles.lock().unwrap();
+        if let Some(meta) = handles.get(&handle.opaque.to_vec()) {
+            if meta.revoked { return false; }
+            if let Some(expires) = meta.expires_at {
+                if chrono::Utc::now() > expires { return false; }
+            }
+            true
+        } else { false }
+    }
 }

@@ -6,14 +6,24 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 use runtime_sandbox::{ResourceQuota, WorkerGuard, ResourceUsage};
 
+/// G7: Explicit worker lifecycle tracking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorkerStateStatus {
+    #[default]
+    Idle,
+    Running,
+    Completed,
+}
+
 /// Per-worker state with live quota enforcement via WorkerGuard.
-/// CF-4 FIX: quota enforcement is active — guard.enforce() called before
-/// spawning and tracked via add_usage() on every resource tick.
+/// G7 FIX: explicit state tracking (Idle/Running/Completed) with transitions in spawn/remove.
 #[derive(Debug)]
 pub struct WorkerState {
     pub guard: WorkerGuard,
     pub cancel: CancellationToken,
     pub handle: Option<JoinHandle<()>>,
+    /// G7: explicit lifecycle state. Transitions: Idle -> Running -> Completed.
+    pub status: WorkerStateStatus,
 }
 
 /// Worker pool with per-worker quota enforcement.
@@ -47,11 +57,11 @@ impl WorkerPool {
 
         let cancel = CancellationToken::new();
         let handle = tokio::spawn(f);
-
         let state = WorkerState {
             guard, // CF-4 FIX: guard stored for ongoing enforcement
             cancel: cancel.clone(),
-            handle: Some(tokio::spawn(async { () })), // placeholder; we don't need output handle
+            handle: None,
+            status: WorkerStateStatus::Running, // G7: explicit transition Idle -> Running
         };
         self.workers.write().await.insert(task_id, state);
         Ok(handle)
@@ -70,11 +80,11 @@ impl WorkerPool {
 
         let cancel = CancellationToken::new();
         let handle = tokio::spawn(f);
-
         let state = WorkerState {
             guard,
             cancel: cancel.clone(),
-            handle: Some(tokio::spawn(async { () })), // placeholder
+            handle: None,
+            status: WorkerStateStatus::Running, // G7: explicit transition Idle -> Running
         };
         self.workers.write().await.insert(task_id, state);
         Ok(handle)
@@ -105,12 +115,24 @@ impl WorkerPool {
     pub async fn cancel(&self, task_id: Uuid) -> bool {
         if let Some(w) = self.workers.read().await.get(&task_id) {
             w.cancel.cancel();
+            if let Some(h) = &w.handle {
+                h.abort();
+            }
             true
         } else { false }
     }
 
     pub async fn remove(&self, task_id: Uuid) -> Option<WorkerState> {
-        self.workers.write().await.remove(&task_id)
+        let removed = self.workers.write().await.remove(&task_id);
+        if let Some(mut state) = removed {
+            // G7: explicit state transition Running -> Completed on removal
+            if state.status == WorkerStateStatus::Running {
+                state.status = WorkerStateStatus::Completed;
+            }
+            Some(state)
+        } else {
+            None
+        }
     }
 
     pub async fn count(&self) -> usize {

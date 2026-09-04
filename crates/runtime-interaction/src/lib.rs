@@ -30,7 +30,7 @@ impl TaskInfo {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum AdapterParams {
     /// HTTP GET/POST request to a URL.
-    Http { url: String, method: Option<String> },
+    Http { url: String, method: Option<String>, body: Option<Vec<u8>>, headers: std::collections::HashMap<String, String> },
     /// MCP protocol invocation.
     Mcp { tool: String, args: std::collections::HashMap<String, String> },
     /// DOM operation: parse + select.
@@ -43,7 +43,28 @@ pub enum AdapterParams {
 
 impl Default for AdapterParams {
     fn default() -> Self {
-        AdapterParams::Http { url: String::new(), method: None }
+        AdapterParams::Http { url: String::new(), method: None, body: None, headers: Default::default() }
+    }
+}
+
+/// Backward-compatible constructor: callers that don't supply body/headers
+/// get empty values.
+impl AdapterParams {
+    pub fn http_get(url: impl Into<String>) -> Self {
+        AdapterParams::Http {
+            url: url.into(),
+            method: Some("GET".into()),
+            body: None,
+            headers: Default::default(),
+        }
+    }
+    pub fn http_post(url: impl Into<String>, body: Option<Vec<u8>>) -> Self {
+        AdapterParams::Http {
+            url: url.into(),
+            method: Some("POST".into()),
+            body,
+            headers: Default::default(),
+        }
     }
 }
 
@@ -298,7 +319,7 @@ mod tests {
     fn test_adapter_params_default() {
         let params = AdapterParams::default();
         match params {
-            AdapterParams::Http { ref url, ref method } => {
+            AdapterParams::Http {  ref url, ref method, body: None, headers: Default::default() } => {
                 assert!(url.is_empty());
                 assert!(method.is_none());
             }

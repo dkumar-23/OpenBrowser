@@ -204,6 +204,25 @@ impl HttpClient {
         self.execute_with_context(req, Some(ctx)).await
     }
 
+    /// G12 fix: execute with typed network error mapping.
+    pub async fn execute_typed(&self, req: Request) -> Result<Response, HttpError> {
+        let url = req.url.clone();
+        match self.execute(req).await {
+            Ok(resp) => Ok(resp),
+            Err(err) => {
+                // Best-effort mapping: if the error was produced by reqwest,
+                // it will typically be a reqwest::Error wrapped in anyhow.
+                // We attempt to downcast; if impossible we fall back to Other.
+                let mapped = if let Some(reqwest_err) = err.downcast_ref::<reqwest::Error>() {
+                    HttpError::from_reqwest(reqwest_err, &url)
+                } else {
+                    HttpError::Other(err.to_string())
+                };
+                Err(mapped)
+            }
+        }
+    }
+
     async fn execute_with_context(
         &self,
         req: Request,
@@ -412,6 +431,34 @@ impl Request {
     pub fn user_agent(mut self, ua: impl Into<String>) -> Self {
         self.user_agent_override = Some(ua.into());
         self
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum HttpError {
+    #[error("DNS resolution failed for {0}")]
+    DnsFailed(String),
+    #[error("TLS handshake failed: {0}")]
+    TlsFailed(String),
+    #[error("Connection refused at {0}")]
+    ConnectionRefused(String),
+    #[error("Request timed out after {0:?}")]
+    Timeout(std::time::Duration),
+    #[error("Request was cancelled")]
+    Cancelled,
+    #[error("Body read error: {0}")]
+    BodyReadError(String),
+    #[error("Other transport error: {0}")]
+    Other(String),
+}
+
+impl HttpError {
+    pub fn from_reqwest(err: &reqwest::Error, url: &str) -> Self {
+        if err.is_timeout() { Self::Timeout(std::time::Duration::from_secs(30)) }
+        else if err.is_connect() { Self::ConnectionRefused(url.to_string()) }
+        else if err.is_decode() { Self::BodyReadError(err.to_string()) }
+        else if err.is_redirect() { Self::Other(format!("redirect error: {}", err)) }
+        else { Self::Other(err.to_string()) }
     }
 }
 
