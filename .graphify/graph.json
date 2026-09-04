@@ -19,9 +19,9 @@
       "id": "Phase2",
       "label": "Web Compatibility",
       "type": "phase",
-      "status": "in-progress",
+      "status": "complete",
       "depends_on": "Phase1",
-      "notes": "2.4 network PASS; 2.2 DOM PASS; 2.3 browser in progress; 2.1 JS PASS"
+      "notes": "All 4 sub-phases PASS: 2.1 JS (23 V8 tests), 2.2 DOM (5 tests), 2.3 Browser (8 tests), 2.4 Network (8 tests)"
     },
     {
       "id": "Phase3",
@@ -176,6 +176,28 @@
       "type": "crate",
       "status": "implemented",
       "notes": "Phase 2.2: HTML parser, DOM tree, selectors, mutation, events, 5 tests"
+    },
+    {
+      "id": "RuntimeBrowser",
+      "label": "runtime-browser crate",
+      "type": "crate",
+      "status": "implemented",
+      "notes": "Phase 2.3: Browser, navigate, forms, fetch, timers, 8 tests"
+    },
+    {
+      "id": "BrowserEngine",
+      "label": "Browser Engine (Phase 2.3)",
+      "type": "feature",
+      "status": "implemented",
+      "notes": "Navigation, cookies, forms, fetch, setTimeout/setInterval via tokio"
+    },
+    {
+      "id": "Phase2Complete",
+      "label": "Phase 2 complete",
+      "type": "phase",
+      "status": "complete",
+      "depends_on": "Phase1",
+      "notes": "All sub-phases 2.1-2.4 PASS"
     }
   ],
   "relations": [
@@ -302,6 +324,22 @@
       "from": "RuntimeDom",
       "to": "Phase2",
       "type": "implemented_in"
+    },
+    {
+      "from": "Phase2",
+      "to": "RuntimeBrowser",
+      "type": "includes",
+      "notes": "Phase 2.3 complete"
+    },
+    {
+      "from": "RuntimeBrowser",
+      "to": "Phase2",
+      "type": "implemented_in"
+    },
+    {
+      "from": "BrowserEngine",
+      "to": "Phase2Complete",
+      "type": "implemented_in"
     }
   ],
   "critical_flaws_found": [
@@ -364,7 +402,7 @@
     }
   ],
   "session_state": {
-    "current": "Session 4 complete. Phase 2.4 PASS + Phase 2.2 PASS + Phase 2.1 PASS (23 V8 tests). Phase 1 true pass verified. All bottlenecks A/B/C/D resolved via loop iterations 1-11. Design contract honored; no new bottlenecks."
+    "current": "Session 4 complete. Phase 2 (Web Compatibility) ALL DONE: 2.1 JS(23 tests), 2.2 DOM(5), 2.3 Browser(8), 2.4 Network(8). Phase 1 true-pass verified. Design contract honored. Next: Phase 3 agent interface."
   },
   "next_session_target": "Phase 2 (Web Compatibility) \u2014 verify integration tests pass before start.",
   "design_contract_ref": "architect-output.md + architect-synthesis/synthesis.md",

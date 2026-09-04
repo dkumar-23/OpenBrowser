@@ -102,8 +102,14 @@ STATUS: STARTED (Phase 1 true pass verified; Phase 2.1 active — Session 4)
 - [ ] (Future) Nesting for closing tags (currently flat)
 - [ ] (Future) Full HTML5 spec (script/style/raw-text, foreign content)
 
-### 2.3 runtime-browser
-- [ ] Navigation, cookies, forms, timers, fetch
+### 2.3 runtime-browser [PASS — Session 4]
+- [x] Browser crate (runtime-browser)
+- [x] Navigation (fetch + parse + cookie observe)
+- [x] Forms (FormData + submit_form via HttpClient)
+- [x] Fetch wrapper (FetchRequest/FetchResponse over HttpClient)
+- [x] Timers (setTimeout/setInterval via tokio)
+- [x] Browser struct (Clone + new/with_client/navigate/fetch/set_timeout)
+- [x] 8 tests pass (browser build + timer + form)
 
 ### 2.4 runtime-network (upgrade) [PASS — Session 4]
 - [x] TLS via `rustls-tls` (reqwest workspace default)

@@ -1274,6 +1274,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime-browser"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "runtime-dom",
+ "runtime-js",
+ "runtime-network",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "runtime-cli"
 version = "0.1.0"
 dependencies = [

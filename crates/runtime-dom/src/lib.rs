@@ -128,6 +128,7 @@ impl HtmlParser {
     }
 }
 
+#[derive(Debug)]
 pub struct DomTree {
     pub root: Arc<RwLock<DomNode>>,
 }

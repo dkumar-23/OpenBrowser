@@ -93,3 +93,15 @@ SESSION DATE: 2026-09-04 (Session 3)
 
 ## DESIGN CONTRACT REMINDER
 Candidate C (Hybrid) is binding. Any deviation from architect-output.md must be surfaced per Phase D rules. CF-1 (policy bypass) is a Phase D deviation worth surfacing. After CF fixes, re-verify with validator agent (Wave 4).
+
+--- SESSION 4 CONTINUATION (Phase 2.3 browser) ---
+- Created crates/runtime-browser (Cargo.toml + src/lib.rs + navigate/forms/fetch/timers)
+- Browser struct: new/with_client/navigate/fetch/set_interval/set_timeout
+- Navigation: fetch + parse HTML + cookie observation
+- Forms: FormData submit via HttpClient (multipart/text/urlencoded minimal)
+- Fetch: FetchRequest / FetchResponse wrapper
+- Timers: setTimeout / setInterval via tokio
+- Build clean (3 warnings: dead code in sub-modules — acceptable)
+- 8 tests pass: browser build, clone, cookie parse minimal, form new
+- Phase 2 complete: 2.1(23)+2.2(5)+2.3(8)+2.4(8) = 44 tests total
+- No new bottlenecks. System stable.

@@ -12,6 +12,7 @@ members = [
     "crates/runtime-cli",
     "crates/runtime-interaction",
     "crates/runtime-js",
+    "crates/runtime-browser",
 ]
 
 [workspace.package]

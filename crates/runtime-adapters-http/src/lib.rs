@@ -14,7 +14,7 @@ pub struct HttpAdapter {
 
 impl HttpAdapter {
     pub fn new(observability: std::sync::Arc<dyn Observability>, policy: std::sync::Arc<PolicyEngine>) -> Self {
-        Self { client: runtime_network::HttpClient::new(), observability, policy }
+        Self { client: runtime_network::HttpClient::new().expect("HttpClient init failed"), observability, policy }
     }
 }
 
