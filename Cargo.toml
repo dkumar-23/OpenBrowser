@@ -8,8 +8,10 @@ members = [
     "crates/runtime-core",
     "crates/runtime-network",
     "crates/runtime-adapters-http",
+    "crates/runtime-dom",
     "crates/runtime-cli",
     "crates/runtime-interaction",
+    "crates/runtime-js",
 ]
 
 [workspace.package]

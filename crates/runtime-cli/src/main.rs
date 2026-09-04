@@ -2,7 +2,7 @@ use std::sync::Arc;
 use runtime_core::{RuntimeKernel, TaskContext};
 use runtime_auth::{AgentIdentity, HumanId};
 use runtime_policy::{PolicyEngine, Capability, Scope, CapabilitySet};
-use runtime_interaction::{AdapterParams, InteractionAdapter, TaskInfo};
+use runtime_interaction::{AdapterParams, InteractionAdapter, TaskInfo, AdapterResult};
 use runtime_adapters_http::HttpAdapter;
 use runtime_observability::{init_tracing, TraceObservability, Observability, TraceContext};
 use runtime_sandbox::ResourceQuota;
@@ -34,25 +34,47 @@ async fn main() {
     );
     let task_id = task_ctx.task_id;
 
-    // Submit to scheduler
-    let adapter = HttpAdapter::new(observability.clone(), policy.clone());
-    let agent_clone = agent.clone();
-    let caps_clone = (*caps).clone();
-    let task_ctx_clone = task_ctx.clone();
+    // Wire the adapter that the scheduler will invoke. The scheduler is now
+    // the sole dispatch point — no independent tokio::spawn is used here.
+    let adapter = Arc::new(HttpAdapter::new(observability.clone(), policy.clone()));
+    let agent_for_exec = agent.clone();
+    let caps_for_exec = (*caps).clone();
 
-    let info = TaskInfo { task_id, agent_id: agent.agent_id.0 };
-    let handle = kernel.scheduler.submit(task_ctx).await.expect("submit failed");
+    // Executor: receives a TaskContext from the scheduler and runs the adapter
+    // inside the scheduled task. This closure is the only place the adapter
+    // is called from.
+    let executor = Arc::new(move |ctx: TaskContext| {
+        let adapter = adapter.clone();
+        let agent = agent_for_exec.clone();
+        let caps = caps_for_exec.clone();
+        async move {
+            let info = TaskInfo {
+                task_id: ctx.task_id,
+                agent_id: ctx.agent_id,
+            };
+            let params = AdapterParams::Http {
+                url: "https://example.com".into(),
+                method: Some("GET".into()),
+            };
+            adapter.execute(&agent, &caps, &info, &params).await
+        }
+    });
 
-    // Run the work async (the scheduler doesn't auto-dispatch; we keep the existing
-    // direct execution to remain testable, but use the scheduler as the entry point).
-    let _ = tokio::spawn(async move {
-        let params = AdapterParams::Http { url: "https://example.com".into(), method: Some("GET".into()) };
-        let info = TaskInfo { task_id: task_ctx_clone.task_id, agent_id: task_ctx_clone.agent_id };
-        let result = adapter.execute(&agent_clone, &caps_clone, &info, &params).await;
-        println!("[OpenBrowser] HTTP result: {:?}", result);
-    }).await;
+    // Start the dispatcher loop. After this, submit() enqueues tasks and the
+    // dispatcher dequeues + runs the adapter.
+    let _dispatcher = kernel.scheduler.start(executor);
 
-    let _ = handle;
+    // Submit to scheduler — this is the entry point. The adapter is NOT
+    // invoked from an independent tokio::spawn.
+    let handle = kernel
+        .scheduler
+        .submit(task_ctx)
+        .await
+        .expect("submit failed");
+
+    // Wait for the scheduled task to complete and report its result.
+    let result: AdapterResult = handle.result.await.expect("scheduler dropped result");
+    println!("[OpenBrowser] HTTP result: {:?}", result);
     let _ = task_id;
 
     // Observable completion
@@ -64,7 +86,7 @@ async fn main() {
         &[("phase", "1")],
     );
 
-    // Verify scheduler metrics observable
+    // Verify scheduler metrics observable — completed should be 1, failed 0.
     let metrics = kernel.scheduler.metrics();
     println!("[OpenBrowser] scheduler metrics: {:?}", metrics);
 }

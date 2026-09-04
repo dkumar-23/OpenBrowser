@@ -65,6 +65,15 @@ SESSION DATE: 2026-09-04 (Session 3)
 
 ---
 
+## PHASE 2 — STARTED (Phase 2.1 runtime-js)
+- Phase 1 true pass verified (all 8 CF fixed, build/test clean, graph updated)
+- `runtime-js` crate created; `JsEngine` trait + `NoopJsEngine` stub implemented (trait-first, R7)
+- Design compliance verified: isolate-first (context.md §5), no V8 hard-coupling (red-flag pass)
+- Phase 2.2–2.4 (DOM, browser, TLS) still blocked behind 2.1 concrete engine choice
+- Next: V8Engine impl or Boa lightweight engine; update `.graphify/graph.json` with `JsEngine` entity (status: trait-implemented)
+
+---
+
 ## KEY FILES FOR NEXT SESSION
 1. SESSION-LOG.md (this file — read first)
 2. PHASE-TRACKER.md

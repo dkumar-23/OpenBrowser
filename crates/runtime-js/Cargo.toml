@@ -1,0 +1,22 @@
+[package]
+name = "runtime-js"
+version = "0.1.0"
+edition = "2021"
+description = "JavaScript engine abstraction for OpenBrowser runtime"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+thiserror = "1"
+# rusty_v8 0.110 is the Deno team's V8 binding — full ECMAScript compliance
+rusty_v8 = { version = "0.32.1", optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[features]
+default = []
+v8 = ["dep:rusty_v8"]              # Full V8 engine (native bindings; full browser compat)

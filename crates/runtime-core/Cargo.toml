@@ -12,4 +12,5 @@ runtime-auth = { path = "../runtime-auth" }
 uuid = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+runtime-interaction = { path = "../runtime-interaction" }
 anyhow = { workspace = true }

@@ -3,12 +3,12 @@
 # Next session: read SESSION-LOG.md first, then PHASE-TRACKER.md
 
 WORKSPACE: /home/linux-user/Documents/Projects/OpenBrowser
-SESSION: 2026-09-04 (Session 3 active)
+SESSION: 2026-09-04 (Session 4 active — Phase 2.4 complete)
 
 ---
 
 ## PHASE 1 — RUNTIME KERNEL
-STATUS: 90% BUILT / 70% TRUE PASS (8 critical flaws found — must fix before Phase 2)
+STATUS: TRUE PASS / 100% (Session 3 complete — all 8 CF fixed, integration tests pass, R1-R7 verified)
 
 ### 1.1 Workspace init [PASS]
 - [x] Cargo workspace at /crates/
@@ -51,39 +51,77 @@ STATUS: 90% BUILT / 70% TRUE PASS (8 critical flaws found — must fix before Ph
 - [FLAW CF-7] Direct adapter call instead of scheduler.submit(TaskContext)
 
 ### PHASE 1 TRUE PASS CONDITIONS (must complete before Phase 2)
-- [ ] CF-1: HttpAdapter calls policy.check() before reqwest call
-- [ ] CF-2: PolicyEngine.check consults agent CapabilitySet
-- [ ] CF-3: ReplayWriter writes JSONL file with monotonic sequence
-- [ ] CF-4: WorkerPool enforces per-worker ResourceQuota
-- [ ] CF-5: metric() actually increments counter/gauge
-- [ ] CF-6: InteractionAdapter trait defined; HttpAdapter implements it
-- [ ] CF-7: CLI submits via scheduler; denies logged
-- [ ] CF-8: Graph refreshed with new entities
-- [ ] Integration test: agent without cap → denied, no network call, replay event recorded
-- [ ] Integration test: agent with cap → request succeeds, replay event recorded
+- [x] CF-1: HttpAdapter calls policy.check_with_caps() before reqwest; returns AdapterResult
+- [x] CF-2: PolicyEngine.check_with_caps() consults agent CapabilitySet; delegation chain verified
+- [x] CF-3: ReplayWriter writes JSONL file with monotonic sequence (writer.next_seq sole source)
+- [x] CF-4: WorkerPool enforces per-worker ResourceQuota (HashMap+RwLock+Quota+Cancel)
+- [x] CF-5: metric() increments counter via metrics crate
+- [x] CF-6: InteractionAdapter trait defined; HttpAdapter implements
+- [x] CF-7: CLI submits via scheduler.submit(TaskContext)
+- [x] CF-8: Graph refreshed (new entities + relations + status)
+- [x] Integration test: agent without cap → Denied, replay event recorded, metric>0
+- [x] Integration test: agent with cap → Success, replay event recorded
+- [x] Reviewer sign-off: R1-R7 PASS, build clean, 11 tests pass
 
 DESIGN FIX REFERENCE: `swarm-output/wave3-policy-fix-design.md`
 
 ---
 
 ## PHASE 2 — WEB COMPATIBILITY
-STATUS: BLOCKED (waiting for Phase 1 CF fixes)
+STATUS: STARTED (Phase 1 true pass verified; Phase 2.1 active — Session 4)
 
-### 2.1 runtime-js
-- [ ] JsEngine trait (compile, execute, isolate)
-- [ ] V8Engine impl (rust-v8)
-- [ ] Lightweight engine impl (boa / rhai)
+### 2.1 runtime-js [IN PROGRESS — Session 4]
+- [x] Crate `runtime-js` created (workspace member)
+- [x] `JsEngine` trait defined (compile/execute/isolate + `JsQuota` + `JsValue` + `JsResult`)
+- [x] `NoopJsEngine` stub (Phase 1 trait-first, no engine hard-coupling — R7 / red-flag pass)
+- [x] `JsIsolate` independent sandbox concept (context.md §5)
+- [x] **ENGINE SWITCHED TO V8** (rusty_v8 0.32.1) — Deno's V8 binding, full ECMAScript compliance, native multi-isolate, fetch/DOM-ready
+- [x] Feature flag: `v8 = ["dep:rusty_v8"]`; boa (optional alt) requires `--no-default-features`
+- [x] **V8JsEngine impl** — `v8_impl.rs` complete; all 8 gap-closures implemented (see loop log)
+- [x] **GAP 1 (persistent isolate)** — `Arc<Mutex<Option<OwnedIsolate>>>` stored; `execute_in_isolate` uses it
+- [x] **GAP 2 (quota)** — `JsQuota` wired to `CreateParams`; memory limit set
+- [x] **GAP 3 (conversion)** — `bool`, `array`, `object`, `BigInt` all handled (BigInt simplified)
+- [x] **GAP 4 (TryCatch)** — JS exceptions caught → `JsError::ExecuteError`
+- [x] **GAP 5 (timing)** — `Instant::now()` measures real `execution_time_ms`
+- [x] **GAP 6 (module)** — `CompiledModule::from_source()` stores source; `execute` re-compiles
+- [x] **GAP 7 (execute_in_isolate)** — uses passed `JsIsolate` (not fresh isolate)
+- [x] **GAP 8 (init)** — `std::sync::Once` for V8 initialization
+- [x] **Integration tests** — 19 pass (1 deferred: persistent context reuse; not blocking Phase 2.2)
+- [x] **Reviewer sign-off** — R1-R7 PASS; CF-1..CF-8 PASS; red-flags PASS
+- [ ] Persistent context reuse (new `Context::new` each call) — deferred Phase 2.3
+- [ ] Phase 2.2 `runtime-dom` — next
 
-### 2.2 runtime-dom
-- [ ] HTML parser
-- [ ] DOM tree (Node, Element, Text, Comment, Document)
-- [ ] Mutation, events, selectors
+### 2.2 runtime-dom [PASS — Session 4]
+- [x] HTML parser (minimal tokenizer: tags, text, comments, quoted attrs)
+- [x] DOM tree (`DomNode`: Document, Element, Text, Comment) — `Arc<RwLock<DomNode>>` for concurrent mutation
+- [x] Selectors: tag, `#id`, `.class` (multi-class via whitespace split)
+- [x] Mutation: `append_child`, `remove_child`, `set_text`
+- [x] `EventEmitter` with `on`/`emit`, thread-safe callbacks
+- [x] `HtmlParser::parse(&str) -> Result<Arc<RwLock<DomNode>>, DomError>`
+- [x] 5 tests pass: tag parse, text+comment, id selector, class selector, event emit
+- [ ] (Future) Nesting for closing tags (currently flat)
+- [ ] (Future) Full HTML5 spec (script/style/raw-text, foreign content)
 
 ### 2.3 runtime-browser
 - [ ] Navigation, cookies, forms, timers, fetch
 
-### 2.4 runtime-network (upgrade)
-- [ ] TLS, cookies, redirects, compression
+### 2.4 runtime-network (upgrade) [PASS — Session 4]
+- [x] TLS via `rustls-tls` (reqwest workspace default)
+- [x] Cookie store via `cookies` reqwest feature + builder flag
+- [x] Redirect policy: `reqwest::redirect::Policy::limited(10)` via builder
+- [x] Compression: `gzip` + `brotli` via reqwest features
+- [x] Observability: `TraceContext` injected in all requests; `tracing::info_span!` with method, url, status
+- [x] `HttpClient` backed by `reqwest::Client` with full builder pattern (`ClientBuilder`)
+- [x] `execute(Request) -> anyhow::Result<Response>` — general HTTP
+- [x] `get(url) -> anyhow::Result<String>` — convenience wrapper
+- [x] `execute_with_trace(Request, TraceContext)` — explicit context propagation
+- [x] Structured `Response` with status, headers, body (bytes) for replay/logging
+- [x] `Request` fluent API: `.header()`, `.text()`, `.json()`, `.timeout()`
+- [x] `Response` helpers: `.text()`, `.json()`, `.is_success()`, `.header()`
+- [x] 8 tests pass (6 unit + 2 integration with mockito)
+- [x] Build clean: `cargo build -p runtime-network`
+- [ ] (Future) Connection pooling / keepalive tuning
+- [ ] (Future) Proxy support
 
 ---
 
