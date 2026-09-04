@@ -1,3 +1,6 @@
+.env
+.env.*
+
 /target
 /Cargo.lock
 
@@ -25,5 +28,8 @@ architect-sketch/
 architect-synthesis/
 context.md
 
-# Test reports (except kept intentionally)
-*.test-report.md
+# Explicit markdown exclusions (anything named like CF4-FIX-SUMMARY.md, etc.)
+CF4-*.md
+architect-todo.md
+*.fix.md
+*.summary.md
