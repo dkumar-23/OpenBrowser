@@ -45,6 +45,24 @@ struct TimeoutState {
 }
 
 #[cfg(feature = "v8")]
+#[derive(Debug)]
+#[repr(C)]
+pub struct OomState {
+    oom_triggered: AtomicBool,
+}
+
+#[cfg(feature = "v8")]
+extern "C" fn v8_near_heap_limit_callback(
+    data: *mut std::ffi::c_void,
+    _current: usize,
+    _initial: usize,
+) -> usize {
+    let state = unsafe { &*(data as *const OomState) };
+    state.oom_triggered.store(true, Ordering::SeqCst);
+    _current
+}
+
+#[cfg(feature = "v8")]
 extern "C" fn v8_interrupt_callback(
     scope: &mut v8::Isolate,
     data: *mut std::ffi::c_void,
@@ -76,6 +94,8 @@ pub struct V8IsolateData {
     context: Arc<Mutex<Option<v8::Global<v8::Context>>>>,
     /// Quota limits applied when this isolate was created.
     quota: JsQuota,
+    /// Shared flag for V8 near-heap-limit events.
+    oom_flag: Arc<Mutex<Option<Arc<OomState>>>>,
 }
 
 #[cfg(feature = "v8")]
@@ -85,6 +105,7 @@ impl Clone for V8IsolateData {
             isolate: self.isolate.clone(),
             context: self.context.clone(),
             quota: self.quota.clone(),
+            oom_flag: self.oom_flag.clone(),
         }
     }
 }
@@ -105,6 +126,9 @@ impl V8IsolateData {
     /// subsequent `execute_script` calls reuse the same context, and
     /// `globalThis` state persists between calls.
     pub fn new(quota: JsQuota) -> Result<Self, JsError> {
+        let oom_flag = Arc::new(Mutex::new(Some(Arc::new(OomState {
+            oom_triggered: AtomicBool::new(false),
+        }))));
         let mut params = v8::CreateParams::default();
         if let Some(max_bytes) = quota.max_memory_bytes {
             // P1-A.3: wire memory budget; V8 applies initial/max to the heap.
@@ -113,6 +137,17 @@ impl V8IsolateData {
             params = params.heap_limits(initial, max_bytes as usize);
         }
         let mut isolate = v8::Isolate::new(params);
+        if quota.max_memory_bytes.is_some() {
+            let oom_ref = Arc::clone(&oom_flag);
+            let oom_guard = oom_ref.lock().unwrap();
+            let oom_inner_ref = oom_guard.as_ref().unwrap();
+            let oom_ptr = Arc::as_ptr(oom_inner_ref) as *mut std::ffi::c_void;
+            drop(oom_guard);
+            isolate.add_near_heap_limit_callback(
+                v8_near_heap_limit_callback,
+                oom_ptr,
+            );
+        }
 
         // P1-A.1: Create the initial persistent Context inside the new isolate.
         // We must hold a `&mut` to the OwnedIsolate (via a HandleScope) to allocate
@@ -131,6 +166,7 @@ impl V8IsolateData {
             isolate: Arc::new(Mutex::new(Some(isolate))),
             context: Arc::new(Mutex::new(Some(initial_context))),
             quota,
+            oom_flag,
         })
     }
 
@@ -140,6 +176,7 @@ impl V8IsolateData {
             isolate: Arc::new(Mutex::new(None)),
             context: Arc::new(Mutex::new(None)),
             quota: JsQuota::default(),
+            oom_flag: Arc::new(Mutex::new(None)),
         }
     }
 
