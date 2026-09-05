@@ -45,6 +45,24 @@ struct TimeoutState {
 }
 
 #[cfg(feature = "v8")]
+#[derive(Debug)]
+#[repr(C)]
+pub struct OomState {
+    oom_triggered: AtomicBool,
+}
+
+#[cfg(feature = "v8")]
+extern "C" fn v8_near_heap_limit_callback(
+    data: *mut std::ffi::c_void,
+    _current: usize,
+    _initial: usize,
+) -> usize {
+    let state = unsafe { &*(data as *const OomState) };
+    state.oom_triggered.store(true, Ordering::SeqCst);
+    _current
+}
+
+#[cfg(feature = "v8")]
 extern "C" fn v8_interrupt_callback(
     scope: &mut v8::Isolate,
     data: *mut std::ffi::c_void,
@@ -76,6 +94,8 @@ pub struct V8IsolateData {
     context: Arc<Mutex<Option<v8::Global<v8::Context>>>>,
     /// Quota limits applied when this isolate was created.
     quota: JsQuota,
+    /// Shared flag for V8 near-heap-limit events.
+    oom_flag: Arc<Mutex<Option<Arc<OomState>>>>,
 }
 
 #[cfg(feature = "v8")]
@@ -85,6 +105,7 @@ impl Clone for V8IsolateData {
             isolate: self.isolate.clone(),
             context: self.context.clone(),
             quota: self.quota.clone(),
+            oom_flag: self.oom_flag.clone(),
         }
     }
 }
@@ -105,6 +126,9 @@ impl V8IsolateData {
     /// subsequent `execute_script` calls reuse the same context, and
     /// `globalThis` state persists between calls.
     pub fn new(quota: JsQuota) -> Result<Self, JsError> {
+        let oom_flag = Arc::new(Mutex::new(Some(Arc::new(OomState {
+            oom_triggered: AtomicBool::new(false),
+        }))));
         let mut params = v8::CreateParams::default();
         if let Some(max_bytes) = quota.max_memory_bytes {
             // P1-A.3: wire memory budget; V8 applies initial/max to the heap.
@@ -113,6 +137,17 @@ impl V8IsolateData {
             params = params.heap_limits(initial, max_bytes as usize);
         }
         let mut isolate = v8::Isolate::new(params);
+        if quota.max_memory_bytes.is_some() {
+            let oom_ref = Arc::clone(&oom_flag);
+            let oom_guard = oom_ref.lock().unwrap();
+            let oom_inner_ref = oom_guard.as_ref().unwrap();
+            let oom_ptr = Arc::as_ptr(oom_inner_ref) as *mut std::ffi::c_void;
+            drop(oom_guard);
+            isolate.add_near_heap_limit_callback(
+                v8_near_heap_limit_callback,
+                oom_ptr,
+            );
+        }
 
         // P1-A.1: Create the initial persistent Context inside the new isolate.
         // We must hold a `&mut` to the OwnedIsolate (via a HandleScope) to allocate
@@ -131,6 +166,7 @@ impl V8IsolateData {
             isolate: Arc::new(Mutex::new(Some(isolate))),
             context: Arc::new(Mutex::new(Some(initial_context))),
             quota,
+            oom_flag,
         })
     }
 
@@ -140,6 +176,7 @@ impl V8IsolateData {
             isolate: Arc::new(Mutex::new(None)),
             context: Arc::new(Mutex::new(None)),
             quota: JsQuota::default(),
+            oom_flag: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -159,6 +196,16 @@ impl V8IsolateData {
         compile_only: bool,
         timeout_ms: Option<u64>,
     ) -> Result<JsResult, JsError> {
+        // P1-A.3 Quota semantics: effective timeout is the minimum of the
+        // caller's requested timeout and the policy's max_cpu_ms. A caller cannot
+        // request 10s when policy permits only 100ms. If neither is set, use None.
+        let effective_timeout = match (timeout_ms, self.quota.max_cpu_ms) {
+            (Some(call), Some(policy)) => Some(call.min(policy)),
+            (Some(call), None) => Some(call),
+            (None, Some(policy)) => Some(policy),
+            (None, None) => None,
+        };
+
         let mut isolate_guard = self.isolate
             .lock()
             .map_err(|_| JsError::IsolateError("poisoned lock".into()))?;
@@ -193,7 +240,7 @@ impl V8IsolateData {
         // We get the thread-safe handle before the HandleScope borrows isolate.
         let isolate_handle = (&**isolate_opt).thread_safe_handle();
 
-        let timeout_state: Option<Arc<TimeoutState>> = timeout_ms
+        let timeout_state: Option<Arc<TimeoutState>> = effective_timeout
             .filter(|&m| m > 0)
             .map(|ms| {
                 let state = Arc::new(TimeoutState {
@@ -291,7 +338,7 @@ impl V8IsolateData {
             // P1-A.2: Check if execution was terminated by timeout BEFORE checking
             // exceptions, because termination generates an uncatchable exception.
             if tc_scope.is_execution_terminating() {
-                return Err(JsError::Timeout(timeout_ms.unwrap_or(0)));
+                return Err(JsError::Timeout(effective_timeout.unwrap_or(0)));
             }
 
             // GAP 4: Check if JS threw an exception
@@ -342,7 +389,7 @@ impl V8IsolateData {
             *context_guard = None;
             // We must return Timeout regardless of what result says,
             // because terminate_execution produces an uncatchable exception.
-            result = Err(JsError::Timeout(timeout_ms.unwrap_or(0)));
+            result = Err(JsError::Timeout(effective_timeout.unwrap_or(0)));
         } else {
             // P1-A.4: drain microtasks after script execution (scopes dropped).
             if let Some(ref mut iso) = *isolate_guard {
