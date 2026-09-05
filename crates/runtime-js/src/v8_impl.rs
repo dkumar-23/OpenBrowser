@@ -44,6 +44,25 @@ struct TimeoutState {
     cancelled: AtomicBool,
 }
 
+/// Shared flag for V8 near-heap-limit events.
+#[cfg(feature = "v8")]
+#[derive(Debug)]
+pub struct OomState {
+    oom_triggered: AtomicBool,
+}
+
+#[cfg(feature = "v8")]
+extern "C" fn v8_near_heap_limit_callback(
+    data: *mut std::ffi::c_void,
+    _current: usize,
+    _initial: usize,
+) -> usize {
+    let state = unsafe { &*(data as *const OomState) };
+    state.oom_triggered.store(true, Ordering::SeqCst);
+    // Return the same limit so V8 treats this as fatal (forces failure path).
+    _current
+}
+
 #[cfg(feature = "v8")]
 extern "C" fn v8_interrupt_callback(
     scope: &mut v8::Isolate,
@@ -76,6 +95,12 @@ pub struct V8IsolateData {
     context: Arc<Mutex<Option<v8::Global<v8::Context>>>>,
     /// Quota limits applied when this isolate was created.
     quota: JsQuota,
+    /// P1-A.3: Shared OOM flag. Set by the NearHeapLimitCallback when V8
+    /// approaches its configured heap ceiling. Checked after script.run so we
+    /// can return JsError::ResourceExceeded instead of letting V8 crash.
+    /// Wrapped in Arc<Mutex<Option<...>>> so the callback (which runs inside
+    /// V8) can set it even though the Arc lives on the main thread.
+    oom_flag: Arc<Mutex<Option<Arc<OomState>>>>,
 }
 
 #[cfg(feature = "v8")]
@@ -85,6 +110,7 @@ impl Clone for V8IsolateData {
             isolate: self.isolate.clone(),
             context: self.context.clone(),
             quota: self.quota.clone(),
+            oom_flag: self.oom_flag.clone(),
         }
     }
 }
@@ -112,7 +138,23 @@ impl V8IsolateData {
             let initial = (max_bytes / 4) as usize;
             params = params.heap_limits(initial, max_bytes as usize);
         }
+        let oom_flag = Arc::new(Mutex::new(Some(Arc::new(OomState {
+            oom_triggered: AtomicBool::new(false),
+        }))));
+        
         let mut isolate = v8::Isolate::new(params);
+        // P1-A.3: Register near-heap-limit callback so V8 notifies us before OOM.
+        let oom_ref = Arc::clone(&oom_flag);
+        let oom_inner = oom_ref.lock().unwrap();
+        let oom_inner_ref = oom_inner.as_ref().unwrap();
+        let oom_ptr = Arc::as_ptr(oom_inner_ref) as *mut std::ffi::c_void;
+        drop(oom_inner); // release lock before calling V8
+        if quota.max_memory_bytes.is_some() {
+            isolate.add_near_heap_limit_callback(
+                v8_near_heap_limit_callback,
+                oom_ptr,
+            );
+        }
 
         // P1-A.1: Create the initial persistent Context inside the new isolate.
         // We must hold a `&mut` to the OwnedIsolate (via a HandleScope) to allocate
@@ -131,6 +173,7 @@ impl V8IsolateData {
             isolate: Arc::new(Mutex::new(Some(isolate))),
             context: Arc::new(Mutex::new(Some(initial_context))),
             quota,
+            oom_flag,
         })
     }
 
@@ -140,6 +183,7 @@ impl V8IsolateData {
             isolate: Arc::new(Mutex::new(None)),
             context: Arc::new(Mutex::new(None)),
             quota: JsQuota::default(),
+            oom_flag: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -170,6 +214,12 @@ impl V8IsolateData {
             }
             let new_isolate = v8::Isolate::new(params);
             *isolate_guard = Some(new_isolate);
+            // P1-A.3: reset OOM flag for fresh isolate.
+            if let Ok(mut guard) = self.oom_flag.lock() {
+                if let Some(ref arc) = *guard {
+                    arc.oom_triggered.store(false, Ordering::SeqCst);
+                }
+            }
         }
         let isolate_opt = isolate_guard
             .as_mut()
@@ -271,6 +321,16 @@ impl V8IsolateData {
                 if let Some(ref state) = timeout_state {
                     state.cancelled.store(true, Ordering::Relaxed);
                 }
+                // P1-A.3: OOM can be reported by V8 even during compile.
+                if let Ok(oom_guard) = self.oom_flag.lock() {
+                    if let Some(ref oom_arc) = *oom_guard {
+                        if oom_arc.oom_triggered.load(Ordering::SeqCst) {
+                            return Err(JsError::ResourceExceeded(
+                                "V8 heap limit exceeded".into(),
+                            ));
+                        }
+                    }
+                }
                 // timeout_state dropped here; V8 interrupt data stays valid
                 // for the duration of this function call.
                 drop(timeout_state);
@@ -329,19 +389,26 @@ impl V8IsolateData {
         }
 
         // P1-A.2: Check if execution was interrupted by timeout.
-        // The watchdog sets timed_out; if true the isolate must be destroyed.
+        // P1-A.3: Check if V8 hit the heap limit during execution.
         let is_timeout = if let Some(ref state) = timeout_state {
             state.timed_out.load(Ordering::SeqCst)
         } else {
             false
         };
+        let is_oom = {
+            match self.oom_flag.lock() {
+                Ok(guard) => guard.as_ref().map_or(false, |arc| arc.oom_triggered.load(Ordering::SeqCst)),
+                Err(_) => false,
+            }
+        };
+
+        if is_oom {
+            return Err(JsError::ResourceExceeded(
+                "V8 heap limit exceeded".into(),
+            ));
+        }
 
         if is_timeout {
-            // Terminated isolates cannot be reused; recreate on next call.
-            *isolate_guard = None;
-            *context_guard = None;
-            // We must return Timeout regardless of what result says,
-            // because terminate_execution produces an uncatchable exception.
             result = Err(JsError::Timeout(timeout_ms.unwrap_or(0)));
         } else {
             // P1-A.4: drain microtasks after script execution (scopes dropped).
