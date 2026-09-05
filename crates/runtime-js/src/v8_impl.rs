@@ -21,6 +21,29 @@ use crate::{
 
 #[cfg(feature = "v8")]
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "v8")]
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// ---------------------------------------------------------------------------
+// P1-A.2: Interrupt mechanism
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "v8")]
+#[repr(C)]
+struct InterruptData {
+    flag: *const AtomicBool,
+}
+
+#[cfg(feature = "v8")]
+extern "C" fn v8_interrupt_callback(
+    scope: &mut v8::Isolate,
+    data: *mut std::ffi::c_void,
+) {
+    let d = unsafe { &*(data as *const InterruptData) };
+    if unsafe { (*d.flag).load(Ordering::SeqCst) } {
+        scope.terminate_execution();
+    }
+}
 
 // ---------------------------------------------------------------------------
 // V8IsolateData — persistent V8 isolate storage
@@ -111,30 +134,70 @@ impl V8IsolateData {
     /// across calls. Uses TryCatch for error handling (GAP 4), measures
     /// execution time (GAP 5), and drains microtasks after execution
     /// (P1-A.4).
+    ///
+    /// P1-A.2: When `timeout_ms` is set (>0), a watchdog thread fires an interrupt
+    /// that calls `terminate_execution()`. On timeout, `JsError::Timeout` is returned
+    /// and the isolate is marked as terminated (set to None) so the next call
+    /// recreates it.
     pub fn execute_script(
         &self,
         source: &str,
         compile_only: bool,
-        _timeout_ms: Option<u64>,
+        timeout_ms: Option<u64>,
     ) -> Result<JsResult, JsError> {
         let mut isolate_guard = self.isolate
             .lock()
             .map_err(|_| JsError::IsolateError("poisoned lock".into()))?;
+        // P1-A.2: If the isolate was terminated by a previous timeout, recreate it.
+        if isolate_guard.is_none() {
+            let params = v8::CreateParams::default();
+            let new_isolate = v8::Isolate::new(params);
+            *isolate_guard = Some(new_isolate);
+        }
         let isolate_opt = isolate_guard
             .as_mut()
             .ok_or_else(|| JsError::IsolateError("isolate is not available".into()))?;
 
-        // P1-A.1: Take the persistent context out of the lock briefly so we
-        // can use it as a Local handle inside the HandleScope below. We MUST
-        // re-store it before returning (or, if the script ran, the Global is
-        // still valid because we only borrowed a Local view). The standard
-        // pattern: take the Option, borrow, put back.
-        let context_guard = self.context
+        let mut context_guard = self.context
             .lock()
             .map_err(|_| JsError::IsolateError("poisoned context lock".into()))?;
+        // P1-A.2: If the isolate was recreated, create a new persistent context.
+        if context_guard.is_none() {
+            let scope = &mut v8::HandleScope::new(isolate_opt);
+            let ctx = v8::Context::new(scope);
+            let global_ctx = v8::Global::new(scope, ctx);
+            *context_guard = Some(global_ctx);
+        }
         let context_global = context_guard
             .as_ref()
             .ok_or_else(|| JsError::IsolateError("persistent context not initialized".into()))?;
+
+        // P1-A.2: Build timeout flag + watchdog thread BEFORE the HandleScope borrows isolate.
+        let timeout_flag: Option<Arc<AtomicBool>> = timeout_ms
+            .filter(|&m| m > 0)
+            .map(|ms| {
+                let flag = Arc::new(AtomicBool::new(false));
+                let flag_clone = Arc::clone(&flag);
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(ms));
+                    flag_clone.store(true, Ordering::SeqCst);
+                });
+                flag
+            });
+
+        // P1-A.2: Register V8 interrupt callback BEFORE the HandleScope (which
+        // takes a &mut borrow of the isolate). request_interrupt is thread-safe
+        // and works fine here.
+        if let Some(ref flag) = timeout_flag {
+            let data = Box::into_raw(Box::new(InterruptData {
+                flag: Arc::as_ptr(flag) as *const AtomicBool,
+            }));
+            let handle = (&**isolate_opt).thread_safe_handle();
+            let _ = handle.request_interrupt(
+                v8_interrupt_callback,
+                data as *mut std::ffi::c_void,
+            );
+        }
 
         let result = {
             let scope = &mut v8::HandleScope::new(isolate_opt);
@@ -176,6 +239,12 @@ impl V8IsolateData {
 
             let elapsed_ms = start.elapsed().as_millis() as u64;
 
+            // P1-A.2: Check if execution was terminated by timeout BEFORE checking
+            // exceptions, because termination generates an uncatchable exception.
+            if tc_scope.is_execution_terminating() {
+                return Err(JsError::Timeout(timeout_ms.unwrap_or(0)));
+            }
+
             // GAP 4: Check if JS threw an exception
             if tc_scope.has_caught() {
                 let exc = tc_scope.exception()
@@ -205,8 +274,23 @@ impl V8IsolateData {
             }
         };
 
-        // P1-A.4: drain microtasks after script execution (scopes dropped).
-        isolate_opt.perform_microtask_checkpoint();
+        // P1-A.2: If a timeout happened, mark the isolate as terminated.
+        // After terminate_execution the isolate is permanently dead and any
+        // further script.run would fail. Recreate via create_isolate.
+        let is_timeout = matches!(&result, Err(JsError::Timeout(_)));
+
+        // Note: isolate_opt is no longer used after this point, so the mutable
+        // borrow of isolate_guard automatically ends here.
+
+        if is_timeout {
+            *isolate_guard = None;
+            *context_guard = None;
+        } else {
+            // P1-A.4: drain microtasks after script execution (scopes dropped).
+            if let Some(ref mut iso) = *isolate_guard {
+                iso.perform_microtask_checkpoint();
+            }
+        }
 
         result
     }
@@ -655,6 +739,63 @@ mod v8_tests {
             matches!(res2.value, JsValue::Number(n) if (n - 2.0).abs() < 0.001),
             "expected 2.0 from second run, got {:?}",
             res2.value
+        );
+    }
+
+    /// P1-A.2: Timeout enforcement — an infinite loop must trigger Timeout.
+    /// We use `for(;;) { JSON.stringify({}); }` which contains V8 API calls
+    /// and safe points so the optimizer does not eliminate the loop.
+    #[test]
+    fn test_v8_timeout_terminates_infinite_loop() {
+        let engine = V8JsEngine::new();
+        let quota = JsQuota::default();
+        let iso = engine.create_isolate(quota).expect("create isolate");
+
+        let start = std::time::Instant::now();
+        let res = engine.execute_in_isolate(
+            &iso,
+            "for(;;) { JSON.stringify({}); }",
+            Some(50),
+        );
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(res, Err(JsError::Timeout(50))),
+            "expected Timeout(50), got {:?}",
+            res
+        );
+        assert!(
+            elapsed.as_secs_f64() < 1.0,
+            "timeout should fire quickly (<1s wall-clock), took {:?}",
+            elapsed
+        );
+    }
+
+    /// P1-A.2: After timeout, the isolate is terminated and the next call must work.
+    /// This verifies the isolate doesn't hang and the mechanism is end-to-end.
+    #[test]
+    fn test_v8_isolate_recreated_after_timeout() {
+        let engine = V8JsEngine::new();
+        let quota = JsQuota::default();
+        let iso = engine.create_isolate(quota.clone()).expect("create");
+
+        // First call: timeout should fire.
+        let res1 = engine.execute_in_isolate(&iso, "for(;;) { JSON.stringify({}); }", Some(50));
+        assert!(
+            matches!(res1, Err(JsError::Timeout(50))),
+            "expected timeout on first call, got {:?}",
+            res1
+        );
+
+        // After timeout, the isolate backing should have been cleared.
+        // The next call must work (recreates/reuses backing).
+        let res2 = engine.execute_in_isolate(&iso, "1 + 1", None);
+        assert!(res2.is_ok(), "expected success after timeout, got {:?}", res2);
+        let res2_val = res2.as_ref().unwrap();
+        assert!(
+            matches!(res2_val.value, JsValue::Number(n) if (n - 2.0).abs() < 0.001),
+            "expected 2.0 after recreation, got {:?}",
+            res2_val.value
         );
     }
 }
