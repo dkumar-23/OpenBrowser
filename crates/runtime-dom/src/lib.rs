@@ -313,10 +313,14 @@ impl HtmlParser {
             .iter()
             .map(convert_handle)
             .collect();
-        Ok(Arc::new(RwLock::new(DomNode::Document {
+        let root = Arc::new(RwLock::new(DomNode::Document {
             children: root_children,
             parent: None,
-        })))
+        }));
+        // P1-B: automatic parent topology — wire after parse so callers never
+        // need to remember to invoke wire_parent_links() manually.
+        DomTree::new(root.clone()).wire_parent_links();
+        Ok(root)
     }
 }
 
@@ -699,6 +703,165 @@ mod tests {
             DomNode::Text { content: s, .. } => assert!(s.contains("if (a < b) {}"), "script text should contain the comparison"),
             _ => panic!("script content is not text"),
         }
+    }
+
+    // ---------- P1-B: parent topology + mutation invariants ----------
+
+    /// Recursively assert that every node's parent pointer is consistent with
+    /// its position in the tree. This is the P1-B "no caller must remember
+    /// wire_parent_links()" guarantee.
+    fn assert_parents_consistent(node: &Arc<RwLock<DomNode>>, expected_parent: Option<&Arc<RwLock<DomNode>>>) {
+        let g = node.read().unwrap();
+        let actual = match &*g {
+            DomNode::Document { parent, .. } => parent.as_ref().map(Arc::clone),
+            DomNode::Element { parent, .. } => parent.as_ref().map(Arc::clone),
+            DomNode::Text { parent, .. } => parent.as_ref().map(Arc::clone),
+            DomNode::Comment { parent, .. } => parent.as_ref().map(Arc::clone),
+            DomNode::DocumentType { parent, .. } => parent.as_ref().map(Arc::clone),
+        };
+        let expected = expected_parent.map(Arc::clone);
+        assert!(
+            Arc::ptr_eq(actual.as_ref().unwrap_or(&Arc::new(RwLock::new(DomNode::Comment { content: String::new(), parent: None }))), expected.as_ref().unwrap_or(&Arc::new(RwLock::new(DomNode::Comment { content: String::new(), parent: None }))))
+            || (actual.is_none() && expected.is_none()),
+            "parent mismatch at node",
+        );
+        let children: Vec<Arc<RwLock<DomNode>>> = match &*g {
+            DomNode::Document { children, .. } | DomNode::Element { children, .. } => children.clone(),
+            _ => Vec::new(),
+        };
+        drop(g);
+        for child in &children {
+            assert_parents_consistent(child, Some(node));
+        }
+    }
+
+    #[test]
+    fn test_parser_automatically_wires_parents_no_manual_call_required() {
+        let html = "<html><body><div id='x'><span>hi</span></div></body></html>";
+        let root = HtmlParser::parse(html).unwrap();
+        // No manual wire_parent_links() call here — parse must do it.
+        assert_parents_consistent(&root, None);
+    }
+
+    #[test]
+    fn test_append_sets_parent_on_child() {
+        let root = HtmlParser::parse("<div></div>").unwrap();
+        let tree = DomTree::new(root.clone());
+        let div = tree.query("div").unwrap();
+        let new_child = Arc::new(RwLock::new(DomNode::Text { content: "x".into(), parent: None }));
+        tree.append_child(&div, new_child.clone());
+        let g = new_child.read().unwrap();
+        let p = match &*g { DomNode::Text { parent, .. } => parent.as_ref().map(Arc::clone), _ => None };
+        assert!(p.is_some() && Arc::ptr_eq(p.as_ref().unwrap(), &div));
+    }
+
+    #[test]
+    fn test_remove_clears_parent_on_child() {
+        let html = "<div><span>x</span></div>";
+        let root = HtmlParser::parse(html).unwrap();
+        let tree = DomTree::new(root.clone());
+        let div = tree.query("div").unwrap();
+        let span = tree.query("span").unwrap();
+        // Before remove: span's parent is div.
+        {
+            let g = span.read().unwrap();
+            let p = match &*g { DomNode::Element { parent, .. } => parent.as_ref().map(Arc::clone), _ => None };
+            assert!(p.is_some() && Arc::ptr_eq(p.as_ref().unwrap(), &div));
+        }
+        tree.remove_child(&div, &span);
+        // After remove: span has no parent.
+        let g = span.read().unwrap();
+        let p = match &*g { DomNode::Element { parent, .. } => parent.as_ref().map(Arc::clone), _ => None };
+        assert!(p.is_none(), "span parent must be cleared after remove");
+        // And div no longer has span as a child.
+        let g = div.read().unwrap();
+        let ch = match &*g { DomNode::Element { children, .. } => children.clone(), _ => Vec::new() };
+        assert!(ch.is_empty());
+    }
+
+    #[test]
+    fn test_reparent_old_parent_loses_child_new_parent_gains_it() {
+        let html = "<div id='a'></div><div id='b'></div>";
+        let root = HtmlParser::parse(html).unwrap();
+        let tree = DomTree::new(root.clone());
+        let a = tree.query("#a").unwrap();
+        let b = tree.query("#b").unwrap();
+        let new_child = Arc::new(RwLock::new(DomNode::Element {
+            tag: "p".into(),
+            attrs: Default::default(),
+            children: Vec::new(),
+            parent: None,
+        }));
+        tree.append_child(&a, new_child.clone());
+        {
+            let g = a.read().unwrap();
+            let ch = match &*g { DomNode::Element { children, .. } => children.clone(), _ => Vec::new() };
+            assert_eq!(ch.len(), 1);
+        }
+        // Reparent: remove from a, append to b.
+        tree.remove_child(&a, &new_child);
+        tree.append_child(&b, new_child.clone());
+        // a is empty.
+        let g = a.read().unwrap();
+        let ch = match &*g { DomNode::Element { children, .. } => children.clone(), _ => Vec::new() };
+        assert!(ch.is_empty());
+        // b has 1 child = new_child.
+        let g = b.read().unwrap();
+        let ch = match &*g { DomNode::Element { children, .. } => children.clone(), _ => Vec::new() };
+        assert_eq!(ch.len(), 1);
+        assert!(Arc::ptr_eq(&ch[0], &new_child));
+        // new_child's parent is b now.
+        let g = new_child.read().unwrap();
+        let p = match &*g { DomNode::Element { parent, .. } => parent.as_ref().map(Arc::clone), _ => None };
+        assert!(p.is_some() && Arc::ptr_eq(p.as_ref().unwrap(), &b));
+    }
+
+    #[test]
+    fn test_repeated_append_is_idempotent_in_counting() {
+        // The same child can be appended; the operation is recorded, not deduplicated.
+        let root = HtmlParser::parse("<div></div>").unwrap();
+        let tree = DomTree::new(root.clone());
+        let div = tree.query("div").unwrap();
+        let child = Arc::new(RwLock::new(DomNode::Text { content: "x".into(), parent: None }));
+        tree.append_child(&div, child.clone());
+        tree.append_child(&div, child.clone());
+        let g = div.read().unwrap();
+        let ch = match &*g { DomNode::Element { children, .. } => children.clone(), _ => Vec::new() };
+        assert_eq!(ch.len(), 2, "two appends yield two children (no dedup)");
+    }
+
+    #[test]
+    fn test_set_text_preserves_parent() {
+        let html = "<div><span></span></div>";
+        let root = HtmlParser::parse(html).unwrap();
+        let tree = DomTree::new(root.clone());
+        let span = tree.query("span").unwrap();
+        tree.set_text(&span, "Hello");
+        let g = span.read().unwrap();
+        match &*g {
+            DomNode::Text { content, parent } => {
+                assert_eq!(content, "Hello");
+                // Parent must still be the div.
+                let div = tree.query("div").unwrap();
+                assert!(parent.is_some() && Arc::ptr_eq(parent.as_ref().unwrap(), &div));
+            }
+            other => panic!("expected Text, got something else: identity mismatch"),
+        }
+    }
+
+    #[test]
+    fn test_parent_topology_recursive_on_deep_tree() {
+        let html = "<html><body><div><p><span><b>deep</b></span></p></div></body></html>";
+        let root = HtmlParser::parse(html).unwrap();
+        // Every parent/child pair in the tree must be correct.
+        assert_parents_consistent(&root, None);
+    }
+
+    #[test]
+    fn test_parent_topology_recursive_on_wide_tree() {
+        let html = "<ul><li>1</li><li>2</li><li>3</li><li>4</li></ul>";
+        let root = HtmlParser::parse(html).unwrap();
+        assert_parents_consistent(&root, None);
     }
 }
 pub mod adapter;
