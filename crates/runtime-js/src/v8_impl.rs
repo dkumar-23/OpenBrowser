@@ -36,6 +36,11 @@ pub struct V8IsolateData {
     /// The owning V8 isolate, wrapped so it can be shared via Arc.
     /// `None` means the isolate has been terminated/dropped.
     isolate: Arc<Mutex<Option<v8::OwnedIsolate>>>,
+    /// Persistent V8 Context (P1-A.1). Created once at isolate creation
+    /// time and reused across `execute_script` calls so that `globalThis`
+    /// state (and the V8 microtask queue) persists between executions.
+    /// `None` for placeholder isolates (no real V8 isolate to attach to).
+    context: Arc<Mutex<Option<v8::Global<v8::Context>>>>,
     /// Quota limits applied when this isolate was created.
     quota: JsQuota,
 }
@@ -45,6 +50,7 @@ impl Clone for V8IsolateData {
     fn clone(&self) -> Self {
         Self {
             isolate: self.isolate.clone(),
+            context: self.context.clone(),
             quota: self.quota.clone(),
         }
     }
@@ -62,13 +68,31 @@ impl std::fmt::Debug for V8IsolateData {
 #[cfg(feature = "v8")]
 impl V8IsolateData {
     /// Create a new persistent isolate backed by a real V8 OwnedIsolate.
+    /// P1-A.1: Also creates the persistent `v8::Global<v8::Context>` so that
+    /// subsequent `execute_script` calls reuse the same context, and
+    /// `globalThis` state persists between calls.
     pub fn new(quota: JsQuota) -> Result<Self, JsError> {
         let params = v8::CreateParams::default();
         // GAP 2: wire memory limit from JsQuota if set (skip complex callback for Phase 2.1)
         // Memory limits enforced via quota tracking; V8 native heap_limits deferred to Phase 4.
-        let isolate = v8::Isolate::new(params);
+        let mut isolate = v8::Isolate::new(params);
+
+        // P1-A.1: Create the initial persistent Context inside the new isolate.
+        // We must hold a `&mut` to the OwnedIsolate (via a HandleScope) to allocate
+        // the Context, then upgrade it to a v8::Global<v8::Context> for storage.
+        let initial_context = {
+            let scope = &mut v8::HandleScope::new(&mut isolate);
+            let ctx = v8::Context::new(scope);
+            // Default the context in for a single `v8::Global` slot. This is
+            // the standard pattern: create a fresh `v8::Global` via `new` and
+            // call `set` to attach the Local handle as a persistent handle.
+            let global = v8::Global::new(scope, ctx);
+            global
+        };
+
         Ok(Self {
             isolate: Arc::new(Mutex::new(Some(isolate))),
+            context: Arc::new(Mutex::new(Some(initial_context))),
             quota,
         })
     }
@@ -77,16 +101,21 @@ impl V8IsolateData {
     pub fn placeholder() -> Self {
         Self {
             isolate: Arc::new(Mutex::new(None)),
+            context: Arc::new(Mutex::new(None)),
             quota: JsQuota::default(),
         }
     }
 
-    /// Execute JS source inside this isolate with a fresh context.
-    /// Uses TryCatch for error handling (GAP 4) and measures execution time (GAP 5).
+    /// Execute JS source inside this isolate, REUSING the persistent context
+    /// (P1-A.1) so that `globalThis` state and the V8 microtask queue persist
+    /// across calls. Uses TryCatch for error handling (GAP 4), measures
+    /// execution time (GAP 5), and drains microtasks after execution
+    /// (P1-A.4).
     pub fn execute_script(
         &self,
         source: &str,
         compile_only: bool,
+        _timeout_ms: Option<u64>,
     ) -> Result<JsResult, JsError> {
         let mut isolate_guard = self.isolate
             .lock()
@@ -95,70 +124,91 @@ impl V8IsolateData {
             .as_mut()
             .ok_or_else(|| JsError::IsolateError("isolate is not available".into()))?;
 
-        let scope = &mut v8::HandleScope::new(isolate_opt);
-        let context = v8::Context::new(scope);
-        let scope = &mut v8::ContextScope::new(scope, context);
+        // P1-A.1: Take the persistent context out of the lock briefly so we
+        // can use it as a Local handle inside the HandleScope below. We MUST
+        // re-store it before returning (or, if the script ran, the Global is
+        // still valid because we only borrowed a Local view). The standard
+        // pattern: take the Option, borrow, put back.
+        let context_guard = self.context
+            .lock()
+            .map_err(|_| JsError::IsolateError("poisoned context lock".into()))?;
+        let context_global = context_guard
+            .as_ref()
+            .ok_or_else(|| JsError::IsolateError("persistent context not initialized".into()))?;
 
-        // GAP 4: Wrap in TryCatch to capture JS exceptions properly
-        let tc_scope = &mut v8::TryCatch::new(scope);
+        let result = {
+            let scope = &mut v8::HandleScope::new(isolate_opt);
+            // P1-A.1: re-derive a Local<Context> from the stored Global instead
+            // of creating a brand new Context every call.
+            let context = v8::Local::new(scope, context_global);
+            let scope = &mut v8::ContextScope::new(scope, context);
 
-        let code = v8::String::new(tc_scope, source)
-            .ok_or_else(|| JsError::CompileError("V8 string creation failed".into()))?;
-        let script = v8::Script::compile(tc_scope, code, None)
-            .ok_or_else(|| {
-                // Extract compilation error message
-                if tc_scope.has_caught() {
-                    let exc = tc_scope.exception().map(|e| e.to_rust_string_lossy(tc_scope))
-                        .unwrap_or_else(|| "unknown compile error".into());
-                    JsError::CompileError(exc)
-                } else {
-                    JsError::CompileError("V8 compile failed".into())
-                }
-            })?;
+            // GAP 4: Wrap in TryCatch to capture JS exceptions properly
+            let tc_scope = &mut v8::TryCatch::new(scope);
 
-        if compile_only {
-            // GAP 6: compile-only path returns empty result
-            return Ok(JsResult {
-                value: JsValue::Undefined,
-                error: None,
-                execution_time_ms: 0,
-            });
-        }
+            let code = v8::String::new(tc_scope, source)
+                .ok_or_else(|| JsError::CompileError("V8 string creation failed".into()))?;
+            let script = v8::Script::compile(tc_scope, code, None)
+                .ok_or_else(|| {
+                    // Extract compilation error message
+                    if tc_scope.has_caught() {
+                        let exc = tc_scope.exception().map(|e| e.to_rust_string_lossy(tc_scope))
+                            .unwrap_or_else(|| "unknown compile error".into());
+                        JsError::CompileError(exc)
+                    } else {
+                        JsError::CompileError("V8 compile failed".into())
+                    }
+                })?;
 
-        // GAP 5: real timing
-        let start = std::time::Instant::now();
+            if compile_only {
+                // GAP 6: compile-only path returns empty result.
+                return Ok(JsResult {
+                    value: JsValue::Undefined,
+                    error: None,
+                    execution_time_ms: 0,
+                });
+            }
 
-        let value = script.run(tc_scope);
+            // GAP 5: real timing
+            let start = std::time::Instant::now();
 
-        let elapsed_ms = start.elapsed().as_millis() as u64;
+            let value = script.run(tc_scope);
 
-        // GAP 4: Check if JS threw an exception
-        if tc_scope.has_caught() {
-            let exc = tc_scope.exception()
-                .map(|e| e.to_rust_string_lossy(tc_scope))
-                .unwrap_or_else(|| "unknown error".into());
-            let msg = tc_scope.message()
-                .map(|m| m.get(tc_scope).to_rust_string_lossy(tc_scope))
-                .unwrap_or_default();
-            return Err(JsError::ExecuteError(format!(
-                "JS error: {} {}",
-                msg,
-                exc
-            )));
-        }
+            let elapsed_ms = start.elapsed().as_millis() as u64;
 
-        let value = value.ok_or_else(|| {
-            JsError::ExecuteError("V8 script.run returned no value".into())
-        })?;
+            // GAP 4: Check if JS threw an exception
+            if tc_scope.has_caught() {
+                let exc = tc_scope.exception()
+                    .map(|e| e.to_rust_string_lossy(tc_scope))
+                    .unwrap_or_else(|| "unknown error".into());
+                let msg = tc_scope.message()
+                    .map(|m| m.get(tc_scope).to_rust_string_lossy(tc_scope))
+                    .unwrap_or_default();
+                Err(JsError::ExecuteError(format!(
+                    "JS error: {} {}",
+                    msg,
+                    exc
+                )))
+            } else {
+                let value = value.ok_or_else(|| {
+                    JsError::ExecuteError("V8 script.run returned no value".into())
+                })?;
 
-        // GAP 3: full value conversion
-        let js_value = v8_value_to_js_value(value, tc_scope);
+                // GAP 3: full value conversion
+                let js_value = v8_value_to_js_value(value, tc_scope);
 
-        Ok(JsResult {
-            value: js_value,
-            error: None,
-            execution_time_ms: elapsed_ms,
-        })
+                Ok(JsResult {
+                    value: js_value,
+                    error: None,
+                    execution_time_ms: elapsed_ms,
+                })
+            }
+        };
+
+        // P1-A.4: drain microtasks after script execution (scopes dropped).
+        isolate_opt.perform_microtask_checkpoint();
+
+        result
     }
 }
 
@@ -297,9 +347,9 @@ impl JsEngine for V8JsEngine {
     }
 
     /// GAP 7: Execute inside the passed persistent isolate (not a fresh one).
-    fn execute_in_isolate(&self, isolate: &JsIsolate, source: &str) -> Result<JsResult, JsError> {
+    fn execute_in_isolate(&self, isolate: &JsIsolate, source: &str, timeout_ms: Option<u64>) -> Result<JsResult, JsError> {
         match &isolate.backing {
-            JsIsolateBacking::V8(data) => data.execute_script(source, false),
+            JsIsolateBacking::V8(data) => data.execute_script(source, false, timeout_ms),
             #[cfg(not(feature = "v8"))]
             _ => Err(JsError::IsolateError("not a V8 isolate".into())),
         }
@@ -418,10 +468,10 @@ mod v8_tests {
         let iso_a = engine.create_isolate(quota.clone()).expect("a");
         let iso_b = engine.create_isolate(quota).expect("b");
 
-        let res_a = engine.execute_in_isolate(&iso_a, "var x = 99; typeof x");
+        let res_a = engine.execute_in_isolate(&iso_a, "var x = 99; typeof x", None);
         assert!(res_a.is_ok());
 
-        let res_b = engine.execute_in_isolate(&iso_b, "typeof x === 'undefined' ? 1 : 0");
+        let res_b = engine.execute_in_isolate(&iso_b, "typeof x === 'undefined' ? 1 : 0", None);
         assert!(res_b.is_ok());
         assert!(
             matches!(res_b.unwrap().value, JsValue::Number(n) if n == 1.0),
@@ -522,20 +572,14 @@ mod v8_tests {
         let iso = engine.create_isolate(quota).expect("create");
 
         // First call sets global
-        let _res1 = engine.execute_in_isolate(&iso, "globalThis.persisted = 42").expect("set");
+        let _res1 = engine.execute_in_isolate(&iso, "globalThis.persisted = 42", None).expect("set");
         // Second call reads it
-        //
-        // NOTE (Phase 2.3 deferred): Current implementation creates a new V8 Context
-        // for each execute_in_isolate call.  globalThis state does NOT persist across
-        // calls.  The correct persistent-context behaviour (same Context reused) is
-        // tracked as Phase 2.3.  This test now verifies the API contract is sound
-        // (no panic, JsIsolate is a valid handle) rather than asserting persistence.
-        let res2 = engine.execute_in_isolate(&iso, "globalThis.persisted").expect("get");
-        // Persistence is deferred to Phase 2.3 — accept current behaviour (Undefined)
-        // so that `cargo test -p runtime-js --features v8` passes cleanly.
+        // P1-A.1: Persistent context means globalThis state survives across
+        // execute_in_isolate calls.
+        let res2 = engine.execute_in_isolate(&iso, "globalThis.persisted", None).expect("get");
         assert!(
-            matches!(res2.value, JsValue::Undefined),
-            "expected Undefined (new Context each call, Phase 2.3 deferred), got {:?}",
+            matches!(res2.value, JsValue::Number(n) if (n - 42.0).abs() < 0.001),
+            "expected persisted 42.0 (P1-A.1 persistent context), got {:?}",
             res2.value
         );
     }
@@ -570,5 +614,47 @@ mod v8_tests {
         } else {
             panic!("expected number");
         }
+    }
+
+    #[test]
+    fn test_v8_persistent_context_global_this() {
+        let engine = V8JsEngine::new();
+        let quota = JsQuota::default();
+        let iso = engine.create_isolate(quota).expect("create");
+
+        // Set global state
+        engine.execute_in_isolate(&iso, "globalThis.__test = 42", None).expect("set");
+        // Read it back — persistent context means it should survive
+        let res = engine.execute_in_isolate(&iso, "globalThis.__test", None).expect("get");
+        assert!(
+            matches!(res.value, JsValue::Number(n) if (n - 42.0).abs() < 0.001),
+            "expected 42.0, got {:?}",
+            res.value
+        );
+    }
+
+    #[test]
+    fn test_v8_counter_increments() {
+        let engine = V8JsEngine::new();
+        let quota = JsQuota::default();
+        let iso = engine.create_isolate(quota).expect("create");
+
+        // First execution: initialize counter to 1
+        let _res1 = engine.execute_in_isolate(&iso, "globalThis.counter = (globalThis.counter || 0) + 1", None).expect("first");
+        // Second execution: increment to 2
+        let res2 = engine.execute_in_isolate(&iso, "globalThis.counter = (globalThis.counter || 0) + 1", None).expect("second");
+        // Read back the counter value
+        let res3 = engine.execute_in_isolate(&iso, "globalThis.counter", None).expect("read");
+        assert!(
+            matches!(res3.value, JsValue::Number(n) if (n - 2.0).abs() < 0.001),
+            "expected counter 2.0, got {:?}",
+            res3.value
+        );
+        // The second result should also show 2 if it evaluated the expression
+        assert!(
+            matches!(res2.value, JsValue::Number(n) if (n - 2.0).abs() < 0.001),
+            "expected 2.0 from second run, got {:?}",
+            res2.value
+        );
     }
 }

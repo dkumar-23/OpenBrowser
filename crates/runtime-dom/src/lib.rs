@@ -1,6 +1,14 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 use thiserror::Error;
+
+use html5ever::driver::ParseOpts;
+use html5ever::tendril::{StrTendril, TendrilSink};
+use html5ever::tree_builder::{ElementFlags, NodeOrText, QuirksMode, TreeSink};
+use html5ever::interface::{Attribute, ExpandedName, QualName};
+use std::cell::OnceCell;
 
 #[derive(Error, Debug, PartialEq)]
 pub enum DomError {
@@ -26,106 +34,300 @@ pub enum DomNode {
     Comment(String),
 }
 
+// Internal node representation used while building the tree via html5ever.
+#[derive(Debug, Clone)]
+enum InternalNode {
+    Document,
+    Element {
+        tag: String,
+        attrs: HashMap<String, String>,
+    },
+    Text(String),
+    Comment(String),
+    Doctype {
+        name: String,
+        public_id: String,
+        system_id: String,
+    },
+    ProcessingInstruction {
+        target: String,
+        data: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct InternalHandle {
+    node: Rc<RefCell<InternalNode>>,
+    children: Rc<RefCell<Vec<InternalHandle>>>,
+    parent: Rc<RefCell<Option<InternalHandle>>>,
+    // Cached QualName for elements, needed by TreeSink::elem_name.
+    // Stored in OnceCell so we can return a reference with 'self lifetime.
+    qual_name: Rc<OnceCell<QualName>>,
+}
+
+impl InternalHandle {
+    fn new(node: InternalNode) -> Self {
+        Self {
+            node: Rc::new(RefCell::new(node)),
+            children: Rc::new(RefCell::new(Vec::new())),
+            parent: Rc::new(RefCell::new(None)),
+            qual_name: Rc::new(OnceCell::new()),
+        }
+    }
+
+    fn get_qual_name(&self) -> &QualName {
+        self.qual_name.get_or_init(|| {
+            let node = self.node.borrow();
+            match &*node {
+                InternalNode::Element { tag, .. } => {
+                    QualName::new(None, "http://www.w3.org/1999/xhtml".into(), tag.clone().into())
+                }
+                _ => QualName::new(None, "http://www.w3.org/1999/xhtml".into(), "".into()),
+            }
+        })
+    }
+}
+
+struct DomSink {
+    document: InternalHandle,
+    errors: Vec<String>,
+}
+
+impl DomSink {
+    fn new() -> Self {
+        Self {
+            document: InternalHandle::new(InternalNode::Document),
+            errors: Vec::new(),
+        }
+    }
+}
+
+fn merge_text_into_last(parent: &InternalHandle, text: StrTendril) {
+    let parent_children = parent.children.borrow();
+    if let Some(last) = parent_children.last() {
+        let mut last_node = last.node.borrow_mut();
+        if let InternalNode::Text(existing) = &mut *last_node {
+            existing.push_str(&text);
+            return;
+        }
+    }
+    drop(parent_children);
+    let text_handle = InternalHandle::new(InternalNode::Text(text.to_string()));
+    *text_handle.parent.borrow_mut() = Some(parent.clone());
+    parent.children.borrow_mut().push(text_handle);
+}
+
+impl TreeSink for DomSink {
+    type Handle = InternalHandle;
+    type Output = Self;
+
+    fn finish(self) -> Self {
+        self
+    }
+
+    fn parse_error(&mut self, msg: std::borrow::Cow<'static, str>) {
+        self.errors.push(msg.to_string());
+    }
+
+    fn get_document(&mut self) -> Self::Handle {
+        self.document.clone()
+    }
+
+    fn elem_name<'a>(&'a self, target: &'a Self::Handle) -> ExpandedName<'a> {
+        target.get_qual_name().expanded()
+    }
+
+    fn create_element(
+        &mut self,
+        name: QualName,
+        attrs: Vec<Attribute>,
+        _flags: ElementFlags,
+    ) -> Self::Handle {
+        let mut attr_map: HashMap<String, String> = HashMap::new();
+        for attr in attrs {
+            attr_map.insert(attr.name.local.to_string(), attr.value.to_string());
+        }
+        let tag = name.local.to_string();
+        let handle = InternalHandle::new(InternalNode::Element {
+            tag,
+            attrs: attr_map,
+        });
+        // Initialize the QualName cache.
+        let _ = handle.qual_name.set(name);
+        handle
+    }
+
+    fn create_comment(&mut self, text: StrTendril) -> Self::Handle {
+        InternalHandle::new(InternalNode::Comment(text.to_string()))
+    }
+
+    fn create_pi(&mut self, target: StrTendril, data: StrTendril) -> Self::Handle {
+        InternalHandle::new(InternalNode::ProcessingInstruction {
+            target: target.to_string(),
+            data: data.to_string(),
+        })
+    }
+
+    fn append(&mut self, parent: &Self::Handle, child: NodeOrText<Self::Handle>) {
+        match child {
+            NodeOrText::AppendNode(node) => {
+                *node.parent.borrow_mut() = Some(parent.clone());
+                parent.children.borrow_mut().push(node);
+            }
+            NodeOrText::AppendText(text) => {
+                merge_text_into_last(parent, text);
+            }
+        }
+    }
+
+    fn append_based_on_parent_node(
+        &mut self,
+        element: &Self::Handle,
+        prev_element: &Self::Handle,
+        child: NodeOrText<Self::Handle>,
+    ) {
+        if element.parent.borrow().is_some() {
+            self.append(prev_element, child);
+        } else {
+            self.append(element, child);
+        }
+    }
+
+    fn append_doctype_to_document(
+        &mut self,
+        name: StrTendril,
+        public_id: StrTendril,
+        system_id: StrTendril,
+    ) {
+        let dt = InternalHandle::new(InternalNode::Doctype {
+            name: name.to_string(),
+            public_id: public_id.to_string(),
+            system_id: system_id.to_string(),
+        });
+        *dt.parent.borrow_mut() = Some(self.document.clone());
+        self.document.children.borrow_mut().push(dt);
+    }
+
+    fn get_template_contents(&mut self, target: &Self::Handle) -> Self::Handle {
+        // For minimal HTML we don't track a separate template contents fragment;
+        // the template element itself holds the children, which is sufficient
+        // for the tests and adapter code.
+        target.clone()
+    }
+
+    fn same_node(&self, x: &Self::Handle, y: &Self::Handle) -> bool {
+        Rc::ptr_eq(&x.node, &y.node)
+    }
+
+    fn set_quirks_mode(&mut self, _mode: QuirksMode) {}
+
+    fn append_before_sibling(
+        &mut self,
+        sibling: &Self::Handle,
+        new_node: NodeOrText<Self::Handle>,
+    ) {
+        let parent_opt = sibling.parent.borrow().clone();
+        let parent = match parent_opt {
+            Some(p) => p,
+            None => return,
+        };
+        match new_node {
+            NodeOrText::AppendNode(node) => {
+                *node.parent.borrow_mut() = Some(parent.clone());
+                let mut sibs = parent.children.borrow_mut();
+                if let Some(pos) = sibs.iter().position(|h| Rc::ptr_eq(&h.node, &sibling.node)) {
+                    sibs.insert(pos, node);
+                } else {
+                    sibs.push(node);
+                }
+            }
+            NodeOrText::AppendText(text) => {
+                let text_handle = InternalHandle::new(InternalNode::Text(text.to_string()));
+                *text_handle.parent.borrow_mut() = Some(parent.clone());
+                let mut sibs = parent.children.borrow_mut();
+                if let Some(pos) = sibs.iter().position(|h| Rc::ptr_eq(&h.node, &sibling.node)) {
+                    sibs.insert(pos, text_handle);
+                } else {
+                    sibs.push(text_handle);
+                }
+            }
+        }
+    }
+
+    fn add_attrs_if_missing(&mut self, target: &Self::Handle, attrs: Vec<Attribute>) {
+        let mut node = target.node.borrow_mut();
+        if let InternalNode::Element { attrs: existing, .. } = &mut *node {
+            for attr in attrs {
+                existing
+                    .entry(attr.name.local.to_string())
+                    .or_insert(attr.value.to_string());
+            }
+        }
+    }
+
+    fn remove_from_parent(&mut self, target: &Self::Handle) {
+        let parent_opt = target.parent.borrow().clone();
+        if let Some(parent) = parent_opt {
+            parent
+                .children
+                .borrow_mut()
+                .retain(|h| !Rc::ptr_eq(&h.node, &target.node));
+            *target.parent.borrow_mut() = None;
+        }
+    }
+
+    fn reparent_children(&mut self, node: &Self::Handle, new_parent: &Self::Handle) {
+        let children: Vec<InternalHandle> = node.children.borrow_mut().drain(..).collect();
+        for child in &children {
+            *child.parent.borrow_mut() = Some(new_parent.clone());
+        }
+        new_parent.children.borrow_mut().extend(children);
+    }
+}
+
 pub struct HtmlParser;
 
 impl HtmlParser {
     pub fn parse(html: &str) -> Result<Arc<RwLock<DomNode>>, DomError> {
-        let mut children: Vec<Arc<RwLock<DomNode>>> = Vec::new();
-        let html = html.trim();
-        let mut remaining = html.to_string();
-
-        while !remaining.is_empty() {
-            if let Some(start) = remaining.find('<') {
-                let before = remaining[..start].trim();
-                if !before.is_empty() {
-                    children.push(Arc::new(RwLock::new(DomNode::Text(before.to_string()))));
-                }
-                remaining = remaining[start..].to_string();
-                if remaining.starts_with("<!--") {
-                    if let Some(end) = remaining.find("-->") {
-                        let content = remaining[4..end].to_string();
-                        children.push(Arc::new(RwLock::new(DomNode::Comment(content))));
-                        remaining = remaining[end + 3..].to_string();
-                    } else {
-                        return Err(DomError::ParseError("unclosed comment".into()));
-                    }
-                } else if remaining.starts_with("</") {
-                    if let Some(end) = remaining.find('>') {
-                        remaining = remaining[end + 1..].to_string();
-                    } else {
-                        return Err(DomError::ParseError("unclosed closing tag".into()));
-                    }
-                } else if remaining.starts_with('<') {
-                    if let Some(end) = remaining.find('>') {
-                        let tag_content = remaining[1..end].to_string();
-                        let tag_name = tag_content
-                            .split_whitespace()
-                            .next()
-                            .unwrap_or("")
-                            .to_string();
-                        let attrs = Self::parse_attrs(&tag_content);
-                        let node = Arc::new(RwLock::new(DomNode::Element {
-                            tag: tag_name,
-                            attrs,
-                            children: Vec::new(),
-                        }));
-                        children.push(node);
-                        remaining = remaining[end + 1..].to_string();
-                    } else {
-                        return Err(DomError::ParseError("unclosed tag".into()));
-                    }
-                } else {
-                    return Err(DomError::ParseError("unexpected <".into()));
-                }
-            } else {
-                children.push(Arc::new(RwLock::new(DomNode::Text(remaining.to_string()))));
-                break;
-            }
-        }
-
-        let root = Arc::new(RwLock::new(DomNode::Document { children }));
-        Ok(root)
+        let sink = DomSink::new();
+        let parser = html5ever::parse_document(sink, ParseOpts::default());
+        let sink = parser.one(html);
+        let root_children: Vec<Arc<RwLock<DomNode>>> = sink
+            .document
+            .children
+            .borrow()
+            .iter()
+            .map(convert_handle)
+            .collect();
+        Ok(Arc::new(RwLock::new(DomNode::Document {
+            children: root_children,
+        })))
     }
+}
 
-    fn parse_attrs(tag_content: &str) -> HashMap<String, String> {
-        let mut attrs = HashMap::new();
-        let mut rest = tag_content.to_string();
-        if let Some(pos) = rest.find(' ') {
-            rest = rest[pos + 1..].to_string();
-        } else {
-            return attrs;
-        }
-        let chars: Vec<char> = rest.chars().collect();
-        let mut i = 0;
-        while i < chars.len() {
-            while i < chars.len() && chars[i].is_whitespace() { i += 1; }
-            if i >= chars.len() { break; }
-            let mut key = String::new();
-            while i < chars.len() && chars[i] != '=' && !chars[i].is_whitespace() {
-                key.push(chars[i]); i += 1;
-            }
-            if i < chars.len() && chars[i] == '=' {
-                i += 1;
-                let mut val = String::new();
-                if i < chars.len() && (chars[i] == '"' || chars[i] == '\'') {
-                    let quote = chars[i];
-                    i += 1;
-                    while i < chars.len() && chars[i] != quote {
-                        val.push(chars[i]); i += 1;
-                    }
-                    if i < chars.len() && chars[i] == quote { i += 1; }
-                } else {
-                    while i < chars.len() && !chars[i].is_whitespace() {
-                        val.push(chars[i]); i += 1;
-                    }
-                }
-                attrs.insert(key, val);
-            } else {
-                attrs.insert(key, String::new());
-            }
-        }
-        attrs
-    }
+fn convert_handle(h: &InternalHandle) -> Arc<RwLock<DomNode>> {
+    let children_vec: Vec<Arc<RwLock<DomNode>>> = h
+        .children
+        .borrow()
+        .iter()
+        .map(convert_handle)
+        .collect();
+    let node = h.node.borrow();
+    let dom = match &*node {
+        InternalNode::Document => DomNode::Document {
+            children: children_vec,
+        },
+        InternalNode::Element { tag, attrs } => DomNode::Element {
+            tag: tag.clone(),
+            attrs: attrs.clone(),
+            children: children_vec,
+        },
+        InternalNode::Text(s) => DomNode::Text(s.clone()),
+        InternalNode::Comment(s) => DomNode::Comment(s.clone()),
+        InternalNode::Doctype { .. } => DomNode::Text(String::new()),
+        InternalNode::ProcessingInstruction { .. } => DomNode::Text(String::new()),
+    };
+    Arc::new(RwLock::new(dom))
 }
 
 #[derive(Debug)]
@@ -304,6 +506,67 @@ mod tests {
         });
         emitter.emit("click", "{}");
         assert!(called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_parse_nested_html_produces_tree() {
+        let html = "<div><p>hi</p></div>";
+        let root = HtmlParser::parse(html).unwrap();
+        let tree = DomTree::new(root);
+
+        // Find div
+        let div = tree.query("div").expect("div should be present");
+        // div should have exactly one child, which is a p
+        let div_children = {
+            let g = div.read().unwrap();
+            match &*g {
+                DomNode::Element { children, .. } => children.clone(),
+                _ => panic!("div is not an element"),
+            }
+        };
+        assert_eq!(div_children.len(), 1, "div should have exactly one child");
+
+        // p should have exactly one child, a text node with "hi"
+        let p_node = div_children.into_iter().next().unwrap();
+        let p_children = {
+            let g = p_node.read().unwrap();
+            match &*g {
+                DomNode::Element { tag, children, .. } => {
+                    assert_eq!(tag, "p", "child should be a p tag");
+                    children.clone()
+                }
+                _ => panic!("div child is not an element"),
+            }
+        };
+        assert_eq!(p_children.len(), 1, "p should have exactly one child");
+        let text_node = p_children.into_iter().next().unwrap();
+        let g = text_node.read().unwrap();
+        match &*g {
+            DomNode::Text(s) => assert_eq!(s, "hi"),
+            _ => panic!("expected text node 'hi'"),
+        }
+    }
+
+    #[test]
+    fn test_parse_script_preserves_content() {
+        let html = "<script>if (a < b) {}</script>";
+        let root = HtmlParser::parse(html).unwrap();
+        let tree = DomTree::new(root);
+        let script = tree.query("script").expect("script tag should exist");
+        let script_children = {
+            let g = script.read().unwrap();
+            match &*g {
+                DomNode::Element { children, .. } => children.clone(),
+                _ => panic!("script is not an element"),
+            }
+        };
+        assert!(!script_children.is_empty(), "script should have preserved content");
+        let text_node = script_children.into_iter().next().unwrap();
+        let g = text_node.read().unwrap();
+        match &*g {
+            DomNode::Text(s) => assert!(s.contains("if (a < b) {}"), "script text should contain the comparison"),
+            _ => panic!("script content is not text"),
+        }
     }
 }
 pub mod adapter;

@@ -195,7 +195,7 @@ pub trait JsEngine: Send + Sync + std::fmt::Debug {
     fn create_isolate(&self, quota: JsQuota) -> Result<JsIsolate, JsError>;
 
     /// Execute source in a specific isolate (if supported by engine).
-    fn execute_in_isolate(&self, isolate: &JsIsolate, source: &str) -> Result<JsResult, JsError>;
+    fn execute_in_isolate(&self, isolate: &JsIsolate, source: &str, timeout_ms: Option<u64>) -> Result<JsResult, JsError>;
 
     /// Check if the engine supports isolates.
     fn supports_isolates(&self) -> bool {
@@ -230,7 +230,7 @@ impl JsEngine for NoopJsEngine {
         Ok(JsIsolate::new())
     }
 
-    fn execute_in_isolate(&self, _isolate: &JsIsolate, _source: &str) -> Result<JsResult, JsError> {
+    fn execute_in_isolate(&self, _isolate: &JsIsolate, _source: &str, _timeout_ms: Option<u64>) -> Result<JsResult, JsError> {
         Err(JsError::NotInitialized(
             "No JavaScript engine initialized. Enable the `v8` feature.".into(),
         ))
