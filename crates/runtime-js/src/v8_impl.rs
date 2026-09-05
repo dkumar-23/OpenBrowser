@@ -159,6 +159,16 @@ impl V8IsolateData {
         compile_only: bool,
         timeout_ms: Option<u64>,
     ) -> Result<JsResult, JsError> {
+        // P1-A.3 Quota semantics: effective timeout is the minimum of the
+        // caller's requested timeout and the policy's max_cpu_ms. A caller cannot
+        // request 10s when policy permits only 100ms. If neither is set, use None.
+        let effective_timeout = match (timeout_ms, self.quota.max_cpu_ms) {
+            (Some(call), Some(policy)) => Some(call.min(policy)),
+            (Some(call), None) => Some(call),
+            (None, Some(policy)) => Some(policy),
+            (None, None) => None,
+        };
+
         let mut isolate_guard = self.isolate
             .lock()
             .map_err(|_| JsError::IsolateError("poisoned lock".into()))?;
@@ -193,7 +203,7 @@ impl V8IsolateData {
         // We get the thread-safe handle before the HandleScope borrows isolate.
         let isolate_handle = (&**isolate_opt).thread_safe_handle();
 
-        let timeout_state: Option<Arc<TimeoutState>> = timeout_ms
+        let timeout_state: Option<Arc<TimeoutState>> = effective_timeout
             .filter(|&m| m > 0)
             .map(|ms| {
                 let state = Arc::new(TimeoutState {
@@ -291,7 +301,7 @@ impl V8IsolateData {
             // P1-A.2: Check if execution was terminated by timeout BEFORE checking
             // exceptions, because termination generates an uncatchable exception.
             if tc_scope.is_execution_terminating() {
-                return Err(JsError::Timeout(timeout_ms.unwrap_or(0)));
+                return Err(JsError::Timeout(effective_timeout.unwrap_or(0)));
             }
 
             // GAP 4: Check if JS threw an exception
@@ -342,7 +352,7 @@ impl V8IsolateData {
             *context_guard = None;
             // We must return Timeout regardless of what result says,
             // because terminate_execution produces an uncatchable exception.
-            result = Err(JsError::Timeout(timeout_ms.unwrap_or(0)));
+            result = Err(JsError::Timeout(effective_timeout.unwrap_or(0)));
         } else {
             // P1-A.4: drain microtasks after script execution (scopes dropped).
             if let Some(ref mut iso) = *isolate_guard {
