@@ -495,6 +495,17 @@ impl DomTree {
     }
 
     pub fn append_child(&self, parent: &Arc<RwLock<DomNode>>, child: Arc<RwLock<DomNode>>) {
+        // Set child's parent pointer to maintain DOM invariants.
+        {
+            let mut c = child.write().unwrap();
+            match &mut *c {
+                DomNode::Document { parent: p, .. } => *p = Some(Arc::clone(parent)),
+                DomNode::Element { parent: p, .. } => *p = Some(Arc::clone(parent)),
+                DomNode::Text { parent: p, .. } => *p = Some(Arc::clone(parent)),
+                DomNode::Comment { parent: p, .. } => *p = Some(Arc::clone(parent)),
+                DomNode::DocumentType { parent: p, .. } => *p = Some(Arc::clone(parent)),
+            }
+        }
         let mut p = parent.write().unwrap();
         match &mut *p {
             DomNode::Document { children, .. } | DomNode::Element { children, .. } => {
@@ -505,6 +516,17 @@ impl DomTree {
     }
 
     pub fn remove_child(&self, parent: &Arc<RwLock<DomNode>>, child: &Arc<RwLock<DomNode>>) {
+        // Clear child's parent pointer to maintain DOM invariants.
+        {
+            let mut c = child.write().unwrap();
+            match &mut *c {
+                DomNode::Document { parent: p, .. } => *p = None,
+                DomNode::Element { parent: p, .. } => *p = None,
+                DomNode::Text { parent: p, .. } => *p = None,
+                DomNode::Comment { parent: p, .. } => *p = None,
+                DomNode::DocumentType { parent: p, .. } => *p = None,
+            }
+        }
         let mut p = parent.write().unwrap();
         match &mut *p {
             DomNode::Document { children, .. } | DomNode::Element { children, .. } => {
@@ -516,7 +538,15 @@ impl DomTree {
 
     pub fn set_text(&self, node: &Arc<RwLock<DomNode>>, text: &str) {
         let mut n = node.write().unwrap();
-        *n = DomNode::Text { content: text.to_string(), parent: None };
+        // Preserve the node's parent rather than destroying it.
+        let old_parent = match &*n {
+            DomNode::Document { parent, .. } => parent.clone(),
+            DomNode::Element { parent, .. } => parent.clone(),
+            DomNode::Text { parent, .. } => parent.clone(),
+            DomNode::Comment { parent, .. } => parent.clone(),
+            DomNode::DocumentType { parent, .. } => parent.clone(),
+        };
+        *n = DomNode::Text { content: text.to_string(), parent: old_parent };
     }
 }
 
