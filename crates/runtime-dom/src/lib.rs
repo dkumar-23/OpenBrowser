@@ -315,6 +315,7 @@ impl HtmlParser {
             .collect();
         Ok(Arc::new(RwLock::new(DomNode::Document {
             children: root_children,
+            parent: None,
         })))
     }
 }
@@ -368,6 +369,49 @@ impl DomTree {
         self.query_all(selector).into_iter().next()
     }
 
+    /// Test whether a node matches a simple selector (tag, #id, .class, [attr], [attr=v]).
+    pub fn matches_simple(node: &DomNode, sel: &str) -> bool {
+        if let DomNode::Element { tag, attrs, .. } = node {
+            if let Some(id) = sel.strip_prefix('#') {
+                return attrs.get("id").map(|s| s == id).unwrap_or(false);
+            }
+            if let Some(cls) = sel.strip_prefix('.') {
+                return attrs.get("class").map(|c| c.split_whitespace().any(|x| x == cls)).unwrap_or(false);
+            }
+            if sel.starts_with('[') && sel.ends_with(']') {
+                let inner = &sel[1..sel.len()-1];
+                if let Some(eq_pos) = inner.find('=') {
+                    let key = &inner[..eq_pos];
+                    let val = inner[eq_pos+1..].trim_matches('"');
+                    return attrs.get(key).map(|s| s == val).unwrap_or(false);
+                } else {
+                    return attrs.contains_key(inner);
+                }
+            }
+            return tag == sel;
+        }
+        false
+    }
+
+    /// Test whether a node matches a compound selector (div.foo, div#main).
+    pub fn matches_compound(node: &DomNode, sel: &str) -> bool {
+        if let Some(pos) = sel.find(|c: char| c == '#' || c == '.') {
+            let tag = &sel[..pos];
+            let rest = &sel[pos..];
+            if let DomNode::Element { tag: node_tag, attrs, .. } = node {
+                if node_tag != tag { return false; }
+                if let Some(id) = rest.strip_prefix('#') {
+                    return attrs.get("id").map(|s| s == id).unwrap_or(false);
+                }
+                if let Some(cls) = rest.strip_prefix('.') {
+                    return attrs.get("class").map(|c| c.split_whitespace().any(|x| x == cls)).unwrap_or(false);
+                }
+            }
+            return false;
+        }
+        Self::matches_simple(node, sel)
+    }
+
     pub fn query_all(&self, selector: &str) -> Vec<Arc<RwLock<DomNode>>> {
         let mut results = Vec::new();
         self.collect_matches(&self.root, selector, &mut results);
@@ -385,7 +429,7 @@ impl DomTree {
             results.push(node.clone());
         }
         let children: Vec<Arc<RwLock<DomNode>>> = match &*node_ref {
-            DomNode::Document { children } | DomNode::Element { children, .. } => {
+            DomNode::Document { children, .. } | DomNode::Element { children, .. } => {
                 children.clone()
             }
             _ => Vec::new(),
@@ -419,7 +463,7 @@ impl DomTree {
     pub fn append_child(&self, parent: &Arc<RwLock<DomNode>>, child: Arc<RwLock<DomNode>>) {
         let mut p = parent.write().unwrap();
         match &mut *p {
-            DomNode::Document { children } | DomNode::Element { children, .. } => {
+            DomNode::Document { children, .. } | DomNode::Element { children, .. } => {
                 children.push(child);
             }
             _ => {}
@@ -429,7 +473,7 @@ impl DomTree {
     pub fn remove_child(&self, parent: &Arc<RwLock<DomNode>>, child: &Arc<RwLock<DomNode>>) {
         let mut p = parent.write().unwrap();
         match &mut *p {
-            DomNode::Document { children } | DomNode::Element { children, .. } => {
+            DomNode::Document { children, .. } | DomNode::Element { children, .. } => {
                 children.retain(|c| !Arc::ptr_eq(c, child));
             }
             _ => {}
@@ -438,7 +482,7 @@ impl DomTree {
 
     pub fn set_text(&self, node: &Arc<RwLock<DomNode>>, text: &str) {
         let mut n = node.write().unwrap();
-        *n = DomNode::Text(text.to_string());
+        *n = DomNode::Text { content: text.to_string(), parent: None };
     }
 }
 
@@ -566,7 +610,7 @@ mod tests {
         let text_node = p_children.into_iter().next().unwrap();
         let g = text_node.read().unwrap();
         match &*g {
-            DomNode::Text(s) => assert_eq!(s, "hi"),
+            DomNode::Text { content: s, .. } => assert_eq!(s, "hi"),
             _ => panic!("expected text node 'hi'"),
         }
     }
@@ -588,7 +632,7 @@ mod tests {
         let text_node = script_children.into_iter().next().unwrap();
         let g = text_node.read().unwrap();
         match &*g {
-            DomNode::Text(s) => assert!(s.contains("if (a < b) {}"), "script text should contain the comparison"),
+            DomNode::Text { content: s, .. } => assert!(s.contains("if (a < b) {}"), "script text should contain the comparison"),
             _ => panic!("script content is not text"),
         }
     }
