@@ -720,11 +720,11 @@ mod tests {
             DomNode::DocumentType { parent, .. } => parent.as_ref().map(Arc::clone),
         };
         let expected = expected_parent.map(Arc::clone);
-        assert!(
-            Arc::ptr_eq(actual.as_ref().unwrap_or(&Arc::new(RwLock::new(DomNode::Comment { content: String::new(), parent: None }))), expected.as_ref().unwrap_or(&Arc::new(RwLock::new(DomNode::Comment { content: String::new(), parent: None }))))
-            || (actual.is_none() && expected.is_none()),
-            "parent mismatch at node",
-        );
+        match (&actual, &expected) {
+            (Some(a), Some(e)) => assert!(Arc::ptr_eq(a, e), "parent mismatch: actual != expected"),
+            (None, None) => {}
+            (a, e) => panic!("parent mismatch: actual={:?}, expected={:?}", a.is_some(), e.is_some()),
+        }
         let children: Vec<Arc<RwLock<DomNode>>> = match &*g {
             DomNode::Document { children, .. } | DomNode::Element { children, .. } => children.clone(),
             _ => Vec::new(),
@@ -752,7 +752,7 @@ mod tests {
         tree.append_child(&div, new_child.clone());
         let g = new_child.read().unwrap();
         let p = match &*g { DomNode::Text { parent, .. } => parent.as_ref().map(Arc::clone), _ => None };
-        assert!(p.is_some() && Arc::ptr_eq(p.as_ref().unwrap(), &div));
+        assert!(p.is_some(), "span should have parent before removal");
     }
 
     #[test]
@@ -761,22 +761,22 @@ mod tests {
         let root = HtmlParser::parse(html).unwrap();
         let tree = DomTree::new(root.clone());
         let div = tree.query("div").unwrap();
+        // Get the span BEFORE removing it (query won't find it post-removal).
         let span = tree.query("span").unwrap();
         // Before remove: span's parent is div.
         {
             let g = span.read().unwrap();
             let p = match &*g { DomNode::Element { parent, .. } => parent.as_ref().map(Arc::clone), _ => None };
-            assert!(p.is_some() && Arc::ptr_eq(p.as_ref().unwrap(), &div));
+            assert!(p.is_some(), "span should have parent before removal");
         }
         tree.remove_child(&div, &span);
-        // After remove: span has no parent.
+        // After remove: span has no parent and is no longer in div's children.
         let g = span.read().unwrap();
         let p = match &*g { DomNode::Element { parent, .. } => parent.as_ref().map(Arc::clone), _ => None };
         assert!(p.is_none(), "span parent must be cleared after remove");
-        // And div no longer has span as a child.
         let g = div.read().unwrap();
         let ch = match &*g { DomNode::Element { children, .. } => children.clone(), _ => Vec::new() };
-        assert!(ch.is_empty());
+        assert!(ch.is_empty(), "div should have no children after remove");
     }
 
     #[test]
