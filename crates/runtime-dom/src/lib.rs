@@ -364,43 +364,39 @@ impl DomTree {
         Self { root }
     }
 
-    /// Second pass: walk the tree and wire parent pointers from children → parent.
-    /// This makes parent relationships accurate in the public DOM after conversion.
-    pub fn wire_parent_links(&self, parent: Option<&Arc<RwLock<DomNode>>>) {
-        let mut queue = vec![&self.root];
-        while let Some(node_arc) = queue.pop() {
-            let children_to_wire: Vec<Arc<RwLock<DomNode>>> = {
-                let n = node_arc.read().unwrap();
-                // Set this node's parent if we have one
-                if let Some(p) = parent {
-                    if let DomNode::Document { parent: pfield, .. } = &mut *n.clone() {
-                        // can't mutably borrow from clone; use write on original
-                    }
+    /// Second pass: recursively wire parent pointers from children → parent.
+    /// Called with the root node and None (root has no parent).
+    fn wire_node(parent: Option<&Arc<RwLock<DomNode>>>, node: &Arc<RwLock<DomNode>>) {
+        let children_to_visit: Vec<Arc<RwLock<DomNode>>> = {
+            let n = node.read().unwrap();
+            match &*n {
+                DomNode::Document { children, .. } | DomNode::Element { children, .. } => {
+                    children.clone()
                 }
-                // Collect children to process
-                match &*n {
-                    DomNode::Document { children, .. } | DomNode::Element { children, .. } => {
-                        children.clone()
-                    }
-                    _ => Vec::new(),
-                }
-            };
-            // Wire parent for each child
-            for child_arc in &children_to_wire {
-                let mut child = child_arc.write().unwrap();
-                match &mut *child {
-                    DomNode::Document { parent: p, .. } => *p = parent.map(|p| Arc::clone(p)),
-                    DomNode::Element { parent: p, .. } => *p = parent.map(|p| Arc::clone(p)),
-                    DomNode::Text { parent: p, .. } => *p = parent.map(|p| Arc::clone(p)),
-                    DomNode::Comment { parent: p, .. } => *p = parent.map(|p| Arc::clone(p)),
-                    DomNode::DocumentType { parent: p, .. } => *p = parent.map(|p| Arc::clone(p)),
-                }
+                _ => Vec::new(),
             }
-            // Queue children for processing
-            for child_arc in &children_to_wire {
-                queue.push(child_arc);
+        };
+        // Wire each child's parent to point to this node
+        for child in &children_to_visit {
+            let mut c = child.write().unwrap();
+            match &mut *c {
+                DomNode::Document { parent: p, .. } => *p = parent.map(Arc::clone),
+                DomNode::Element { parent: p, .. } => *p = parent.map(Arc::clone),
+                DomNode::Text { parent: p, .. } => *p = parent.map(Arc::clone),
+                DomNode::Comment { parent: p, .. } => *p = parent.map(Arc::clone),
+                DomNode::DocumentType { parent: p, .. } => *p = parent.map(Arc::clone),
             }
         }
+        // Recurse into each child
+        for child in &children_to_visit {
+            Self::wire_node(Some(node), child);
+        }
+    }
+
+    /// Wire parent pointers after the full tree is built via convert_handle.
+    /// Call this once after HtmlParser::parse() returns.
+    pub fn wire_parent_links(&self) {
+        Self::wire_node(None, &self.root);
     }
 
     pub fn query(&self, selector: &str) -> Option<Arc<RwLock<DomNode>>> {
