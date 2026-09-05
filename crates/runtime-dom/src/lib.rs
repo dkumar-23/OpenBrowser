@@ -24,14 +24,28 @@ pub enum DomError {
 pub enum DomNode {
     Document {
         children: Vec<Arc<RwLock<DomNode>>>,
+        parent: Option<Arc<RwLock<DomNode>>>,
+    },
+    DocumentType {
+        name: String,
+        public_id: String,
+        system_id: String,
+        parent: Option<Arc<RwLock<DomNode>>>,
     },
     Element {
         tag: String,
         attrs: HashMap<String, String>,
         children: Vec<Arc<RwLock<DomNode>>>,
+        parent: Option<Arc<RwLock<DomNode>>>,
     },
-    Text(String),
-    Comment(String),
+    Text {
+        content: String,
+        parent: Option<Arc<RwLock<DomNode>>>,
+    },
+    Comment {
+        content: String,
+        parent: Option<Arc<RwLock<DomNode>>>,
+    },
 }
 
 // Internal node representation used while building the tree via html5ever.
@@ -313,19 +327,29 @@ fn convert_handle(h: &InternalHandle) -> Arc<RwLock<DomNode>> {
         .map(convert_handle)
         .collect();
     let node = h.node.borrow();
+    let parent_arc: Option<Arc<RwLock<DomNode>>> = h.parent.borrow().as_ref().and_then(|p| {
+        Some(convert_handle(p)) // simplified; full parent wiring needs two-pass
+    });
     let dom = match &*node {
         InternalNode::Document => DomNode::Document {
             children: children_vec,
+            parent: None,
         },
         InternalNode::Element { tag, attrs } => DomNode::Element {
             tag: tag.clone(),
             attrs: attrs.clone(),
             children: children_vec,
+            parent: None,
         },
-        InternalNode::Text(s) => DomNode::Text(s.clone()),
-        InternalNode::Comment(s) => DomNode::Comment(s.clone()),
-        InternalNode::Doctype { .. } => DomNode::Text(String::new()),
-        InternalNode::ProcessingInstruction { .. } => DomNode::Text(String::new()),
+        InternalNode::Text(s) => DomNode::Text { content: s.clone(), parent: None },
+        InternalNode::Comment(s) => DomNode::Comment { content: s.clone(), parent: None },
+        InternalNode::Doctype { name, public_id, system_id } => DomNode::DocumentType {
+            name: name.clone(),
+            public_id: public_id.clone(),
+            system_id: system_id.clone(),
+            parent: None,
+        },
+        InternalNode::ProcessingInstruction { .. } => DomNode::Comment { content: String::new(), parent: None },
     };
     Arc::new(RwLock::new(dom))
 }
