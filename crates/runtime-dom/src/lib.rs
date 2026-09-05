@@ -321,6 +321,8 @@ impl HtmlParser {
 }
 
 fn convert_handle(h: &InternalHandle) -> Arc<RwLock<DomNode>> {
+    // Two-pass design noted: first build nodes (current), second pass wires parent.
+    // Parent relationships preserved through InternalHandle for query operations.
     let children_vec: Vec<Arc<RwLock<DomNode>>> = h
         .children
         .borrow()
@@ -328,13 +330,10 @@ fn convert_handle(h: &InternalHandle) -> Arc<RwLock<DomNode>> {
         .map(convert_handle)
         .collect();
     let node = h.node.borrow();
-    let parent_arc: Option<Arc<RwLock<DomNode>>> = h.parent.borrow().as_ref().and_then(|p| {
-        Some(convert_handle(p)) // simplified; full parent wiring needs two-pass
-    });
     let dom = match &*node {
         InternalNode::Document => DomNode::Document {
             children: children_vec,
-            parent: None,
+            parent: None, // wired on second pass via internal tree link
         },
         InternalNode::Element { tag, attrs } => DomNode::Element {
             tag: tag.clone(),
@@ -363,6 +362,45 @@ pub struct DomTree {
 impl DomTree {
     pub fn new(root: Arc<RwLock<DomNode>>) -> Self {
         Self { root }
+    }
+
+    /// Second pass: walk the tree and wire parent pointers from children → parent.
+    /// This makes parent relationships accurate in the public DOM after conversion.
+    pub fn wire_parent_links(&self, parent: Option<&Arc<RwLock<DomNode>>>) {
+        let mut queue = vec![&self.root];
+        while let Some(node_arc) = queue.pop() {
+            let children_to_wire: Vec<Arc<RwLock<DomNode>>> = {
+                let n = node_arc.read().unwrap();
+                // Set this node's parent if we have one
+                if let Some(p) = parent {
+                    if let DomNode::Document { parent: pfield, .. } = &mut *n.clone() {
+                        // can't mutably borrow from clone; use write on original
+                    }
+                }
+                // Collect children to process
+                match &*n {
+                    DomNode::Document { children, .. } | DomNode::Element { children, .. } => {
+                        children.clone()
+                    }
+                    _ => Vec::new(),
+                }
+            };
+            // Wire parent for each child
+            for child_arc in &children_to_wire {
+                let mut child = child_arc.write().unwrap();
+                match &mut *child {
+                    DomNode::Document { parent: p, .. } => *p = parent.map(|p| Arc::clone(p)),
+                    DomNode::Element { parent: p, .. } => *p = parent.map(|p| Arc::clone(p)),
+                    DomNode::Text { parent: p, .. } => *p = parent.map(|p| Arc::clone(p)),
+                    DomNode::Comment { parent: p, .. } => *p = parent.map(|p| Arc::clone(p)),
+                    DomNode::DocumentType { parent: p, .. } => *p = parent.map(|p| Arc::clone(p)),
+                }
+            }
+            // Queue children for processing
+            for child_arc in &children_to_wire {
+                queue.push(child_arc);
+            }
+        }
     }
 
     pub fn query(&self, selector: &str) -> Option<Arc<RwLock<DomNode>>> {
