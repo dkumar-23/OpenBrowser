@@ -48,6 +48,7 @@ pub struct Scheduler {
     backpressure: Arc<Semaphore>,
     concurrency_sem: Arc<Semaphore>,
     dispatcher: Arc<std::sync::Mutex<Option<Arc<JoinHandle<()>>>>>,
+    #[allow(dead_code)] // kept for diagnostics; limits enforced via the semaphores
     max_concurrent: usize,
     cancellation_registry: Arc<std::sync::Mutex<std::collections::HashMap<Uuid, tokio_util::sync::CancellationToken>>>,
     execution_records: Arc<std::sync::Mutex<std::collections::HashMap<Uuid, Arc<crate::execution::ExecutionRecord>>>>,

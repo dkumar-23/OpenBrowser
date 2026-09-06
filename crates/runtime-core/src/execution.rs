@@ -41,9 +41,9 @@ impl ExecutionState {
 }
 
 #[derive(Debug, Clone)]
-struct StateWithTime {
-    state: ExecutionState,
-    updated_at: DateTime<Utc>,
+pub struct StateWithTime {
+    pub state: ExecutionState,
+    pub updated_at: DateTime<Utc>,
 }
 
 impl Default for StateWithTime {

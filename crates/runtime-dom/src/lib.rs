@@ -48,6 +48,18 @@ pub enum DomNode {
     },
 }
 
+impl DomNode {
+    pub fn parent(&self) -> &Option<Arc<RwLock<DomNode>>> {
+        match self {
+            DomNode::Document { parent, .. }
+            | DomNode::DocumentType { parent, .. }
+            | DomNode::Element { parent, .. }
+            | DomNode::Text { parent, .. }
+            | DomNode::Comment { parent, .. } => parent,
+        }
+    }
+}
+
 // Internal node representation used while building the tree via html5ever.
 #[derive(Debug, Clone)]
 enum InternalNode {
@@ -63,6 +75,8 @@ enum InternalNode {
         public_id: String,
         system_id: String,
     },
+    // Target/data preserved from the parser; not consulted by queries yet.
+    #[allow(dead_code)]
     ProcessingInstruction {
         target: String,
         data: String,
@@ -418,53 +432,67 @@ impl DomTree {
         self.query_all(selector).into_iter().next()
     }
 
-    /// Test whether a node matches a simple selector (tag, #id, .class, [attr], [attr=v]).
-    pub fn matches_simple(node: &DomNode, sel: &str) -> bool {
-        if let DomNode::Element { tag, attrs, .. } = node {
-            if let Some(id) = sel.strip_prefix('#') {
-                return attrs.get("id").map(|s| s == id).unwrap_or(false);
-            }
-            if let Some(cls) = sel.strip_prefix('.') {
-                return attrs.get("class").map(|c| c.split_whitespace().any(|x| x == cls)).unwrap_or(false);
-            }
-            if sel.starts_with('[') && sel.ends_with(']') {
-                let inner = &sel[1..sel.len()-1];
-                if let Some(eq_pos) = inner.find('=') {
-                    let key = &inner[..eq_pos];
-                    let val = inner[eq_pos+1..].trim_matches('"');
-                    return attrs.get(key).map(|s| s == val).unwrap_or(false);
-                } else {
-                    return attrs.contains_key(inner);
-                }
-            }
-            return tag == sel;
-        }
-        false
-    }
-
-    /// Test whether a node matches a compound selector (div.foo, div#main).
-    pub fn matches_compound(node: &DomNode, sel: &str) -> bool {
-        if let Some(pos) = sel.find(|c: char| c == '#' || c == '.') {
-            let tag = &sel[..pos];
-            let rest = &sel[pos..];
-            if let DomNode::Element { tag: node_tag, attrs, .. } = node {
-                if node_tag != tag { return false; }
-                if let Some(id) = rest.strip_prefix('#') {
-                    return attrs.get("id").map(|s| s == id).unwrap_or(false);
-                }
-                if let Some(cls) = rest.strip_prefix('.') {
-                    return attrs.get("class").map(|c| c.split_whitespace().any(|x| x == cls)).unwrap_or(false);
-                }
-            }
-            return false;
-        }
-        Self::matches_simple(node, sel)
-    }
-
+    /// All nodes matching a selector. Supported subset:
+    /// tag (`div`), `#id`, `.class`, compound (`div.foo`, `div#main`),
+    /// attribute (`[attr]`, `[attr="value"]`),
+    /// descendant (`A B`) and direct child (`A > B`) combinators.
+    ///
+    /// Known limitations (return empty rather than error): multi-class
+    /// `.a.b`, chained combinators (`a > b > c`, `a b c`), and whitespace or
+    /// `>` inside quoted attribute values.
     pub fn query_all(&self, selector: &str) -> Vec<Arc<RwLock<DomNode>>> {
+        let selector = selector.trim();
+        // Direct child combinator: "A > B" — B nodes whose parent matches A.
+        if let Some(pos) = selector.find('>') {
+            let (parent_sel, child_sel) = (selector[..pos].trim(), selector[pos + 1..].trim());
+            return self
+                .nodes_matching(child_sel)
+                .into_iter()
+                .filter(|n| self.ancestor_matches(n, parent_sel, true))
+                .collect();
+        }
+        // Descendant combinator: "A B" — B nodes with any ancestor matching A.
+        let parts: Vec<&str> = selector.split_whitespace().collect();
+        if parts.len() == 2 {
+            return self
+                .nodes_matching(parts[1])
+                .into_iter()
+                .filter(|n| self.ancestor_matches(n, parts[0], false))
+                .collect();
+        }
+        self.nodes_matching(selector)
+    }
+
+    fn nodes_matching(&self, selector: &str) -> Vec<Arc<RwLock<DomNode>>> {
         let mut results = Vec::new();
         self.collect_matches(&self.root, selector, &mut results);
         results
+    }
+
+    /// Whether an ancestor of `node` matches `selector` (immediate parent only
+    /// when `direct` is set). Uses the parent pointers wired by P1-B.
+    ///
+    /// Defensive bounds: the walk stops at this tree's root and is capped at
+    /// MAX_ANCESTOR_HOPS so a malformed parent chain (e.g. a cycle introduced
+    /// via append_child) can never hang the query.
+    fn ancestor_matches(&self, node: &Arc<RwLock<DomNode>>, selector: &str, direct: bool) -> bool {
+        const MAX_ANCESTOR_HOPS: usize = 256;
+        let mut hops = 0usize;
+        let mut current = node.read().unwrap().parent().clone();
+        while let Some(n) = current {
+            if Self::matches_selector(&n.read().unwrap(), selector) {
+                return true;
+            }
+            if direct
+                || std::sync::Arc::ptr_eq(&n, &self.root)
+                || hops >= MAX_ANCESTOR_HOPS
+            {
+                return false;
+            }
+            hops += 1;
+            current = n.read().unwrap().parent().clone();
+        }
+        false
     }
 
     fn collect_matches(
@@ -490,26 +518,66 @@ impl DomTree {
     }
 
     fn matches_selector(node: &DomNode, selector: &str) -> bool {
-        match node {
-            DomNode::Element { tag, attrs, .. } => {
-                if selector == tag {
-                    return true;
+        let (tag, attrs) = match node {
+            DomNode::Element { tag, attrs, .. } => (tag, attrs),
+            _ => return false,
+        };
+        // Compound selector: tag followed by #id or .class (e.g. div.foo, div#main).
+        if !selector.starts_with('[') && !selector.starts_with('#') && !selector.starts_with('.') {
+            if let Some(pos) = selector.find(|c| c == '#' || c == '.') {
+                if !tag.eq_ignore_ascii_case(&selector[..pos]) {
+                    return false;
                 }
-                if let Some(id) = selector.strip_prefix('#') {
+                let rest = &selector[pos..];
+                if let Some(id) = rest.strip_prefix('#') {
                     return attrs.get("id").map_or(false, |v| v == id);
                 }
-                if let Some(cls) = selector.strip_prefix('.') {
+                if let Some(cls) = rest.strip_prefix('.') {
                     return attrs.get("class").map_or(false, |v| {
                         v.split_whitespace().any(|c| c == cls)
                     });
                 }
-                false
+                return false;
             }
-            _ => false,
         }
+        if let Some(id) = selector.strip_prefix('#') {
+            return attrs.get("id").map_or(false, |v| v == id);
+        }
+        if let Some(cls) = selector.strip_prefix('.') {
+            return attrs.get("class").map_or(false, |v| {
+                v.split_whitespace().any(|c| c == cls)
+            });
+        }
+        if selector.starts_with('[') && selector.ends_with(']') {
+            let inner = selector[1..selector.len() - 1].trim();
+            if let Some(eq) = inner.find('=') {
+                let key = inner[..eq].trim();
+                let val = inner[eq + 1..].trim().trim_matches('"');
+                return attrs.get(key).map_or(false, |v| v == val);
+            }
+            return attrs.contains_key(inner);
+        }
+        tag.eq_ignore_ascii_case(selector)
     }
 
-    pub fn append_child(&self, parent: &Arc<RwLock<DomNode>>, child: Arc<RwLock<DomNode>>) {
+    /// Append `child` to `parent`, maintaining the parent-pointer invariant.
+    ///
+    /// Returns false (and performs no mutation) if the append would create a
+    /// cycle — i.e. `parent` is `child` itself or lies inside `child`'s
+    /// subtree. Without this guard, the resulting children/parent cycles
+    /// would hang tree traversal and overflow recursive Drop glue.
+    pub fn append_child(&self, parent: &Arc<RwLock<DomNode>>, child: Arc<RwLock<DomNode>>) -> bool {
+        if Arc::ptr_eq(parent, &child) || Self::contains(&child, parent) {
+            return false;
+        }
+        // Reject appends under non-container nodes before mutating anything,
+        // so a false return never leaves a half-wired child.
+        {
+            let p = parent.read().unwrap();
+            if !matches!(&*p, DomNode::Document { .. } | DomNode::Element { .. }) {
+                return false;
+            }
+        }
         // Set child's parent pointer to maintain DOM invariants.
         {
             let mut c = child.write().unwrap();
@@ -525,9 +593,31 @@ impl DomTree {
         match &mut *p {
             DomNode::Document { children, .. } | DomNode::Element { children, .. } => {
                 children.push(child);
+                true
             }
-            _ => {}
+            _ => false,
         }
+    }
+
+    /// Whether `node` lies inside `subtree_root`'s subtree. Iterative so it
+    /// stays safe even if a malformed structure already exists.
+    fn contains(subtree_root: &Arc<RwLock<DomNode>>, node: &Arc<RwLock<DomNode>>) -> bool {
+        let mut stack = vec![Arc::clone(subtree_root)];
+        while let Some(n) = stack.pop() {
+            let children: Vec<Arc<RwLock<DomNode>>> = match &*n.read().unwrap() {
+                DomNode::Document { children, .. } | DomNode::Element { children, .. } => {
+                    children.clone()
+                }
+                _ => Vec::new(),
+            };
+            for c in children {
+                if Arc::ptr_eq(&c, node) {
+                    return true;
+                }
+                stack.push(c);
+            }
+        }
+        false
     }
 
     pub fn remove_child(&self, parent: &Arc<RwLock<DomNode>>, child: &Arc<RwLock<DomNode>>) {
@@ -862,10 +952,10 @@ mod tests {
             DomNode::Text { content, parent } => {
                 assert_eq!(content, "Hello");
                 // Parent must still be the div.
-                let div = tree.query("div").unwrap();
+                let _div = tree.query("div").unwrap();
                 assert!(parent.is_some(), "set_text should preserve parent reference");
             }
-            other => panic!("expected Text, got something else: identity mismatch"),
+            _other => panic!("expected Text, got something else: identity mismatch"),
         }
     }
 

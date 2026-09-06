@@ -13,6 +13,8 @@ use runtime_observability::{Observability, ReplayEvent};
 use std::sync::{Arc, RwLock};
 use serde_json;
 
+use crate::DomTree;
+
 use crate::{HtmlParser, DomNode};
 
 /// DOM adapter — parses HTML and selects elements via the InteractionAdapter trait.
@@ -118,148 +120,17 @@ impl InteractionAdapter for DomAdapter {
     }
 }
 
-/// Select text content from DOM nodes matching a CSS selector (simple + compound subset).
-/// Supported subset: tag, #id, .class, div.foo, div#main,
-/// [attr], [attr=value], ancestor descendant, parent > child.
+/// Select text content from DOM nodes matching a CSS selector.
+/// Delegates matching to the single selector engine in `DomTree::query_all`.
+/// Supported subset: tag, #id, .class, compound (div.foo, div#main),
+/// [attr], [attr=value], "ancestor descendant", "parent > child".
 fn select_from_node(root: &Arc<RwLock<DomNode>>, selector: &str) -> Vec<String> {
-    use crate::DomTree;
     let mut results = Vec::new();
-    let root_guard = root.read().unwrap();
-    // Compound selectors: div.foo, div#main
-    if !selector.starts_with('#') && !selector.starts_with('.')
-        && !selector.starts_with('[') && (selector.contains('#') || selector.contains('.')) {
-        compound_collect(&root_guard, selector, &mut results);
-    } else if selector.starts_with('[') {
-        attr_collect(&root_guard, selector, &mut results);
-    } else if selector.contains('>') {
-        let parts: Vec<&str> = selector.split('>').map(|s| s.trim()).collect();
-        if parts.len() == 2 {
-            direct_child_collect(&root_guard, parts[0], parts[1], &mut results);
-        }
-    } else if selector.contains(' ') {
-        let parts: Vec<&str> = selector.split_whitespace().collect();
-        if parts.len() == 2 {
-            descendant_collect(&root_guard, parts[0], parts[1], &mut results);
-        }
-    } else if let Some(id) = selector.strip_prefix('#') {
-        collect_by_id(&root_guard, id, &mut results);
-    } else if let Some(cls) = selector.strip_prefix('.') {
-        collect_by_class(&root_guard, cls, &mut results);
-    } else {
-        collect_by_tag(&root_guard, selector, &mut results);
+    for node in DomTree::new(Arc::clone(root)).query_all(selector) {
+        collect_all_text(&node.read().unwrap(), &mut results);
     }
-    let _ = DomTree::matches_simple; // re-export test helper
     results
 }
-
-fn compound_collect(node: &DomNode, sel: &str, results: &mut Vec<String>) {
-    use crate::DomTree;
-    if DomTree::matches_compound(node, sel) {
-        collect_all_text(node, results);
-    }
-    if let DomNode::Element { children, .. } = node {
-        for child in children {
-            compound_collect(&child.read().unwrap(), sel, results);
-        }
-    }
-}
-
-fn attr_collect(node: &DomNode, sel: &str, results: &mut Vec<String>) {
-    use crate::DomTree;
-    if DomTree::matches_simple(node, sel) {
-        collect_all_text(node, results);
-    }
-    if let DomNode::Element { children, .. } = node {
-        for child in children {
-            attr_collect(&child.read().unwrap(), sel, results);
-        }
-    }
-}
-
-fn direct_child_collect(node: &DomNode, parent_sel: &str, child_sel: &str, results: &mut Vec<String>) {
-    use crate::DomTree;
-    if let DomNode::Element { children, .. } = node {
-        if DomTree::matches_simple(node, parent_sel) {
-            for child in children {
-                let c = child.read().unwrap();
-                if DomTree::matches_simple(&c, child_sel) {
-                    collect_all_text(&c, results);
-                }
-            }
-        }
-        for child in children {
-            direct_child_collect(&child.read().unwrap(), parent_sel, child_sel, results);
-        }
-    }
-}
-
-fn descendant_collect(node: &DomNode, ancestor: &str, descendant: &str, results: &mut Vec<String>) {
-    use crate::DomTree;
-    if let DomNode::Element { children, .. } = node {
-        if DomTree::matches_simple(node, ancestor) {
-            for child in children {
-                collect_descendants_matching(&child.read().unwrap(), descendant, results);
-            }
-        }
-        for child in children {
-            descendant_collect(&child.read().unwrap(), ancestor, descendant, results);
-        }
-    }
-}
-
-fn collect_descendants_matching(node: &DomNode, sel: &str, results: &mut Vec<String>) {
-    use crate::DomTree;
-    if DomTree::matches_simple(node, sel) {
-        collect_all_text(node, results);
-    }
-    if let DomNode::Element { children, .. } = node {
-        for child in children {
-            collect_descendants_matching(&child.read().unwrap(), sel, results);
-        }
-    }
-}
-
-fn collect_by_id(node: &DomNode, id: &str, results: &mut Vec<String>) {
-    if let DomNode::Element { attrs, children, .. } = node {
-        if let Some(val) = attrs.get("id") {
-            if val == id {
-                collect_all_text(node, results);
-            }
-        }
-    }
-    if let DomNode::Element { children, .. } = node {
-        for child in children {
-            collect_by_id(&child.read().unwrap(), id, results);
-        }
-    }
-}
-
-fn collect_by_class(node: &DomNode, class: &str, results: &mut Vec<String>) {
-    if let DomNode::Element { attrs, children, .. } = node {
-        if attrs.get("class").map(|c| c.split_whitespace().any(|s| s == class)).unwrap_or(false) {
-            collect_all_text(node, results);
-        }
-    }
-    if let DomNode::Element { children, .. } = node {
-        for child in children {
-            collect_by_class(&child.read().unwrap(), class, results);
-        }
-    }
-}
-
-fn collect_by_tag(node: &DomNode, tag: &str, results: &mut Vec<String>) {
-    if let DomNode::Element { tag: node_tag, children, .. } = node {
-        if node_tag.eq_ignore_ascii_case(tag) {
-            collect_all_text(node, results);
-        }
-    }
-    if let DomNode::Element { children, .. } = node {
-        for child in children {
-            collect_by_tag(&child.read().unwrap(), tag, results);
-        }
-    }
-}
-
 fn collect_all_text(node: &DomNode, results: &mut Vec<String>) {
     match node {
         DomNode::Text { content, .. } => {
@@ -283,99 +154,6 @@ mod tests {
 
     fn make_identity() -> AgentIdentity {
         AgentIdentity::new(HumanId(uuid::Uuid::new_v4()))
-    }
-
-    fn matches_simple(node: &DomNode, sel: &str) -> bool {
-        if let DomNode::Element { tag, attrs, .. } = node {
-            if let Some(id) = sel.strip_prefix('#') {
-                return attrs.get("id").map(|s| s == id).unwrap_or(false);
-            }
-            if let Some(cls) = sel.strip_prefix('.') {
-                return attrs.get("class").map(|c| c.split_whitespace().any(|x| x == cls)).unwrap_or(false);
-            }
-            if sel.starts_with('[') {
-                // [attr] or [attr=value]
-                let inner = &sel[1..sel.len()-1];
-                if let Some(eq_pos) = inner.find('=') {
-                    let key = &inner[..eq_pos];
-                    let val = inner[eq_pos+1..].trim_matches('"');
-                    return attrs.get(key).map(|s| s == val).unwrap_or(false);
-                } else {
-                    return attrs.contains_key(inner);
-                }
-            }
-            return tag == sel;
-        }
-        false
-    }
-
-    fn matches_compound(node: &DomNode, sel: &str) -> bool {
-        // div.foo, div#main
-        if let Some(pos) = sel.find(|c: char| c == '#' || c == '.') {
-            let tag = &sel[..pos];
-            let rest = &sel[pos..];
-            if let DomNode::Element { tag: node_tag, attrs, .. } = node {
-                if node_tag != tag { return false; }
-                if let Some(id) = rest.strip_prefix('#') {
-                    return attrs.get("id").map(|s| s == id).unwrap_or(false);
-                }
-                if let Some(cls) = rest.strip_prefix('.') {
-                    return attrs.get("class").map(|c| c.split_whitespace().any(|x| x == cls)).unwrap_or(false);
-                }
-            }
-        }
-        false
-    }
-
-    fn compound_selection(node: &DomNode, sel: &str, results: &mut Vec<String>) {
-        if matches_compound(node, sel) || matches_simple(node, sel) {
-            collect_all_text(node, results);
-        }
-        if let DomNode::Element { children, .. } = node {
-            for child in children {
-                compound_selection(&child.read().unwrap(), sel, results);
-            }
-        }
-    }
-
-    fn descendant_selection(node: &DomNode, ancestor: &str, descendant: &str, results: &mut Vec<String>) {
-        if let DomNode::Element { children, .. } = node {
-            if matches_simple(node, ancestor) {
-                for child in children {
-                    collect_descendants_matching(&child.read().unwrap(), descendant, results);
-                }
-            }
-            for child in children {
-                descendant_selection(&child.read().unwrap(), ancestor, descendant, results);
-            }
-        }
-    }
-
-    fn collect_descendants_matching(node: &DomNode, sel: &str, results: &mut Vec<String>) {
-        if matches_simple(node, sel) {
-            collect_all_text(node, results);
-        }
-        if let DomNode::Element { children, .. } = node {
-            for child in children {
-                collect_descendants_matching(&child.read().unwrap(), sel, results);
-            }
-        }
-    }
-
-    fn direct_child_selection(node: &DomNode, parent_sel: &str, child_sel: &str, results: &mut Vec<String>) {
-        if let DomNode::Element { children, .. } = node {
-            if matches_simple(node, parent_sel) {
-                for child in children {
-                    let c = child.read().unwrap();
-                    if matches_simple(&c, child_sel) {
-                        collect_all_text(&c, results);
-                    }
-                }
-            }
-            for child in children {
-                direct_child_selection(&child.read().unwrap(), parent_sel, child_sel, results);
-            }
-        }
     }
 
     #[test]
@@ -407,6 +185,36 @@ mod tests {
         let html = "<html><body><div><span>Direct</span></div></body></html>";
         let root = HtmlParser::parse(html).unwrap();
         assert!(!select_from_node(&root, "div > span").is_empty());
+    }
+
+    #[test]
+    fn test_selector_attr_value_edge_cases() {
+        // Attribute values containing selector-significant characters.
+        let html = r#"<html><body><div data-x="a.b">dot</div><div data-y="a b">space</div></body></html>"#;
+        let root = HtmlParser::parse(html).unwrap();
+        // Value with a dot: pinned — must match exactly, not be split.
+        assert_eq!(select_from_node(&root, r#"[data-x="a.b"]"#), vec!["dot".to_string()]);
+        // Whitespace inside the brackets around attr/value.
+        assert_eq!(select_from_node(&root, r#"[ data-x = "a.b" ]"#), vec!["dot".to_string()]);
+    }
+
+    #[test]
+    fn test_append_child_rejects_cycles() {
+        // A malformed structure (cycle via append_child) must never be
+        // created: append_child rejects appends that would make a node's
+        // parent point into its own subtree.
+        let html = "<html><body><div id='a'><span id='b'>x</span></div></body></html>";
+        let root = HtmlParser::parse(html).unwrap();
+        let tree = DomTree::new(Arc::clone(&root));
+        let div = tree.query("div").unwrap();
+        let span = tree.query("span").unwrap();
+        // Rejected: div is an ancestor of span, so appending it under span
+        // would create a children/parent cycle.
+        assert!(!tree.append_child(&span, Arc::clone(&div)), "cycle append must be rejected");
+        // Rejected: appending a node under itself.
+        assert!(!tree.append_child(&div, Arc::clone(&div)), "self append must be rejected");
+        // Tree remains well-formed and queryable.
+        assert_eq!(tree.query_all("body span").len(), 1);
     }
 
     #[tokio::test]

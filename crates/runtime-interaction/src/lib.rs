@@ -10,7 +10,6 @@ use async_trait::async_trait;
 use runtime_auth::AgentIdentity;
 use runtime_policy::CapabilitySet;
 use uuid::Uuid;
-use chrono::{DateTime, Utc};
 
 /// Minimal task info passed across adapter boundary — no core dependency.
 /// The adapter only needs task/agent IDs for replay/logging.
@@ -37,34 +36,11 @@ pub enum AdapterParams {
     Dom { html: String, selector: String },
     /// JS execution in isolate.
     Js { source: String },
-    /// Visual: screenshot or accessibility tree.
-    Visual { url: String },
 }
 
 impl Default for AdapterParams {
     fn default() -> Self {
         AdapterParams::Http { url: String::new(), method: None, body: None, headers: Default::default() }
-    }
-}
-
-/// Backward-compatible constructor: callers that don't supply body/headers
-/// get empty values.
-impl AdapterParams {
-    pub fn http_get(url: impl Into<String>) -> Self {
-        AdapterParams::Http {
-            url: url.into(),
-            method: Some("GET".into()),
-            body: None,
-            headers: Default::default(),
-        }
-    }
-    pub fn http_post(url: impl Into<String>, body: Option<Vec<u8>>) -> Self {
-        AdapterParams::Http {
-            url: url.into(),
-            method: Some("POST".into()),
-            body,
-            headers: Default::default(),
-        }
     }
 }
 
@@ -99,26 +75,24 @@ impl AdapterResult {
     }
 }
 
-/// Adapter identifier — supports adapter selection (HTTP > DOM > JS > visual per context.md §11).
+/// Adapter identifier — supports adapter selection (HTTP > DOM > JS > MCP per context.md §11).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AdapterKind {
     Http,
     Dom,
     Js,
     Mcp,
-    Visual,
 }
 
 impl AdapterKind {
-    /// Preference order: HTTP is preferred, then DOM, then JS, then MCP, then Visual.
+    /// Preference order: HTTP is preferred, then DOM, then JS, then MCP.
     /// Per context.md §11: agent should not need to understand mechanism.
-    pub fn preference_order() -> [Self; 5] {
+    pub fn preference_order() -> [Self; 4] {
         [
             AdapterKind::Http,
             AdapterKind::Dom,
             AdapterKind::Js,
             AdapterKind::Mcp,
-            AdapterKind::Visual,
         ]
     }
 }
@@ -168,26 +142,8 @@ pub trait InteractionAdapter: Send + Sync + std::fmt::Debug {
     ) -> AdapterResult;
 }
 
-/// Interaction event — semantic-level observation (distinct from replay file).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct InteractionEvent {
-    pub task_id: Uuid,
-    pub agent_id: Uuid,
-    pub adapter_kind: AdapterKind,
-    pub capability: String,
-    pub outcome: InteractionOutcome,
-    pub timestamp: DateTime<Utc>,
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub enum InteractionOutcome {
-    Denied { reason: String },
-    Success,
-    Error { message: String },
-}
-
 /// Adapter selection: given a capability name and a list of available adapters,
-/// return the first that handles it (HTTP > DOM > JS > visual per context.md §11).
+/// return the first that handles it (HTTP > DOM > JS > MCP per context.md §11).
 pub fn select_adapter<'a>(
     adapters: &'a [Box<dyn InteractionAdapter>],
     action: &str,
@@ -287,12 +243,11 @@ mod tests {
         assert_eq!(order[1], AdapterKind::Dom);
         assert_eq!(order[2], AdapterKind::Js);
         assert_eq!(order[3], AdapterKind::Mcp);
-        assert_eq!(order[4], AdapterKind::Visual);
     }
 
     #[test]
     fn test_adapter_registry_register_and_resolve() {
-        let mut registry = AdapterRegistry::new();
+        let registry = AdapterRegistry::new();
         assert!(registry.is_empty());
         assert!(registry.resolve("http.get").is_none());
     }
@@ -319,9 +274,10 @@ mod tests {
     fn test_adapter_params_default() {
         let params = AdapterParams::default();
         match params {
-            AdapterParams::Http {  ref url, ref method, body: None, headers: Default::default() } => {
+            AdapterParams::Http {  ref url, ref method, body: None, headers } => {
                 assert!(url.is_empty());
                 assert!(method.is_none());
+                assert!(headers.is_empty());
             }
             _ => panic!("expected Http variant"),
         }

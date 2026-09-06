@@ -71,6 +71,9 @@ pub struct InMemoryBroker {
     handles: std::sync::Mutex<std::collections::HashMap<Vec<u8>, HandleMeta>>,
 }
 
+// agent_id/scope/issued_at are recorded for the future real broker;
+// the Phase 1 stub only consults revoked/expires_at.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct HandleMeta {
     agent_id: AgentId,
