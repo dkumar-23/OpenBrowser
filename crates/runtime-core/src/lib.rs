@@ -1,7 +1,7 @@
 use std::sync::{Arc, RwLock};
 use uuid::Uuid;
 use tokio_util::sync::CancellationToken;
-use runtime_observability::{TraceContext, Observability, ReplayEvent, LifecycleEvent};
+use runtime_observability::{TraceContext, Observability, ReplayEvent};
 use runtime_sandbox::ResourceQuota;
 use runtime_policy::{PolicyEngine, Decision};
 use runtime_auth::AgentIdentity;

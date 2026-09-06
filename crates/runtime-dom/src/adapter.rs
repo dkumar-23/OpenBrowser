@@ -13,6 +13,8 @@ use runtime_observability::{Observability, ReplayEvent};
 use std::sync::{Arc, RwLock};
 use serde_json;
 
+use crate::DomTree;
+
 use crate::{HtmlParser, DomNode};
 
 /// DOM adapter — parses HTML and selects elements via the InteractionAdapter trait.
@@ -118,64 +120,21 @@ impl InteractionAdapter for DomAdapter {
     }
 }
 
-/// Select text content from DOM nodes matching a CSS selector (simple support).
-/// Supports: tagname, #id, .class (multi-class via whitespace split).
+/// Select text content from DOM nodes matching a CSS selector.
+/// Delegates matching to the single selector engine in `DomTree::query_all`.
+/// Supported subset: tag, #id, .class, compound (div.foo, div#main),
+/// [attr], [attr=value], "ancestor descendant", "parent > child".
 fn select_from_node(root: &Arc<RwLock<DomNode>>, selector: &str) -> Vec<String> {
     let mut results = Vec::new();
-    let root_guard = root.read().unwrap();
-    if let Some(id) = selector.strip_prefix('#') {
-        collect_by_id(&root_guard, id, &mut results);
-    } else if let Some(cls) = selector.strip_prefix('.') {
-        collect_by_class(&root_guard, cls, &mut results);
-    } else {
-        collect_by_tag(&root_guard, selector, &mut results);
+    for node in DomTree::new(Arc::clone(root)).query_all(selector) {
+        collect_all_text(&node.read().unwrap(), &mut results);
     }
     results
 }
-
-fn collect_by_id(node: &DomNode, id: &str, results: &mut Vec<String>) {
-    if let DomNode::Element { attrs, children, .. } = node {
-        if attrs.get("id").map(|s| s.as_str()) == Some(id) {
-            collect_all_text(node, results);
-        }
-    }
-    if let DomNode::Element { children, .. } = node {
-        for child in children {
-            collect_by_id(&child.read().unwrap(), id, results);
-        }
-    }
-}
-
-fn collect_by_class(node: &DomNode, class: &str, results: &mut Vec<String>) {
-    if let DomNode::Element { attrs, children, .. } = node {
-        if attrs.get("class").map(|c| c.split_whitespace().any(|s| s == class)).unwrap_or(false) {
-            collect_all_text(node, results);
-        }
-    }
-    if let DomNode::Element { children, .. } = node {
-        for child in children {
-            collect_by_class(&child.read().unwrap(), class, results);
-        }
-    }
-}
-
-fn collect_by_tag(node: &DomNode, tag: &str, results: &mut Vec<String>) {
-    if let DomNode::Element { tag: node_tag, children, .. } = node {
-        if node_tag.eq_ignore_ascii_case(tag) {
-            collect_all_text(node, results);
-        }
-    }
-    if let DomNode::Element { children, .. } = node {
-        for child in children {
-            collect_by_tag(&child.read().unwrap(), tag, results);
-        }
-    }
-}
-
 fn collect_all_text(node: &DomNode, results: &mut Vec<String>) {
     match node {
-        DomNode::Text(text) => {
-            let t = text.trim();
+        DomNode::Text { content, .. } => {
+            let t = content.trim();
             if !t.is_empty() { results.push(t.to_string()); }
         }
         DomNode::Element { children, .. } => {
@@ -195,6 +154,67 @@ mod tests {
 
     fn make_identity() -> AgentIdentity {
         AgentIdentity::new(HumanId(uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn test_selector_compound() {
+        let html = "<html><body><div id='main' class='x'><p class='x'>Hello</p></div></body></html>";
+        let root = HtmlParser::parse(html).unwrap();
+        assert!(!select_from_node(&root, "div#main").is_empty());
+        assert!(!select_from_node(&root, "div.x").is_empty());
+        assert!(!select_from_node(&root, "p.x").is_empty());
+    }
+
+    #[test]
+    fn test_selector_attribute() {
+        let html = r#"<html><body><div data-id="42"><span>x</span></div></body></html>"#;
+        let root = HtmlParser::parse(html).unwrap();
+        assert!(!select_from_node(&root, "[data-id]").is_empty());
+        assert!(!select_from_node(&root, r#"[data-id="42"]"#).is_empty());
+    }
+
+    #[test]
+    fn test_selector_descendant() {
+        let html = "<html><body><div><span>Hello</span></div></body></html>";
+        let root = HtmlParser::parse(html).unwrap();
+        assert!(!select_from_node(&root, "div span").is_empty());
+    }
+
+    #[test]
+    fn test_selector_child() {
+        let html = "<html><body><div><span>Direct</span></div></body></html>";
+        let root = HtmlParser::parse(html).unwrap();
+        assert!(!select_from_node(&root, "div > span").is_empty());
+    }
+
+    #[test]
+    fn test_selector_attr_value_edge_cases() {
+        // Attribute values containing selector-significant characters.
+        let html = r#"<html><body><div data-x="a.b">dot</div><div data-y="a b">space</div></body></html>"#;
+        let root = HtmlParser::parse(html).unwrap();
+        // Value with a dot: pinned — must match exactly, not be split.
+        assert_eq!(select_from_node(&root, r#"[data-x="a.b"]"#), vec!["dot".to_string()]);
+        // Whitespace inside the brackets around attr/value.
+        assert_eq!(select_from_node(&root, r#"[ data-x = "a.b" ]"#), vec!["dot".to_string()]);
+    }
+
+    #[test]
+    fn test_append_child_rejects_cycles() {
+        // A malformed structure (cycle via append_child) must never be
+        // created: append_child rejects appends that would make a node's
+        // parent point into its own subtree.
+        let html = "<html><body><div id='a'><span id='b'>x</span></div></body></html>";
+        let root = HtmlParser::parse(html).unwrap();
+        let tree = DomTree::new(Arc::clone(&root));
+        let div = tree.query("div").unwrap();
+        let span = tree.query("span").unwrap();
+        // Rejected: div is an ancestor of span, so appending it under span
+        // would create a children/parent cycle.
+        assert!(!tree.append_child(&span, Arc::clone(&div)), "cycle append must be rejected");
+        // Rejected: appending a node under itself.
+        assert!(!tree.append_child(&div, Arc::clone(&div)), "self append must be rejected");
+        // Tree remains well-formed and queryable.
+        assert_eq!(tree.query_all("body span").len(), 1);
     }
 
     #[tokio::test]

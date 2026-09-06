@@ -19,9 +19,6 @@ pub struct ResourceUsage {
 }
 
 #[derive(Clone, Debug)]
-pub struct Watchdog { /* stub for crash/watchdog */ }
-
-#[derive(Clone, Debug)]
 pub struct WorkerGuard {
     pub quota: ResourceQuota,
     pub usage: ResourceUsage,

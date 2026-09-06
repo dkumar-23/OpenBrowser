@@ -47,7 +47,7 @@ async fn test_google_search_dom_rust() {
             // Query for 'a' tags and check their text content
             let links = res.dom.query_all("a");
             let rust_links: Vec<_> = links.iter()
-                .filter(|node| {
+                .filter(|_node| {
                     // Check if any link text contains "rust" (case-insensitive)
                     // We inspect the Arc<RwLock<DomNode>> for Text content
                     // For this test, just count links

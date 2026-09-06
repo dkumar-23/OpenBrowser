@@ -1,4 +1,4 @@
-use super::{BrowserError, NavigationResult, ObservedCookie, NavigationPolicy};
+use super::{BrowserError, NavigationResult, ObservedCookie};
 use runtime_network::HttpClient;
 use runtime_dom::HtmlParser;
 
@@ -53,7 +53,7 @@ fn parse_cookie(header: &str) -> Option<ObservedCookie> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test] fn policy_default() { let _ = NavigationPolicy::default(); }
+    #[test] fn policy_default() { let _ = crate::NavigationPolicy::default(); }
     #[test] fn cookie_parse() { assert!(parse_cookie("a=b; Path=/").is_some()); }
     #[test] fn cookie_parse_minimal() { assert!(parse_cookie("x=y").is_some()); }
 }

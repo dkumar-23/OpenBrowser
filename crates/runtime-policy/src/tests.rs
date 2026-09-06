@@ -6,7 +6,7 @@
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    
     use crate::{PolicyEngine, CapabilitySet, Capability, Scope, Decision};
     use runtime_auth::{AgentIdentity, HumanId};
 

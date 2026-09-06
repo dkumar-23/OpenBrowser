@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use super::*;
+    
     use std::sync::Arc;
     use runtime_observability::{TraceContext, LogLevel, ReplayEvent, Observability, TraceObservability};
     use uuid::Uuid;

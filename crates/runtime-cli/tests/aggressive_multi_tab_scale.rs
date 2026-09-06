@@ -1,7 +1,5 @@
 use std::sync::Arc;
 use tokio;
-use runtime_core::worker::WorkerPool;
-use uuid::Uuid;
 
 /// AGGRESSIVE SCALE + LOCK + QUOTA TESTS
 /// Verifies: adapter registry resolves by preference order,
@@ -10,7 +8,7 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn scale_multi_tab_and_adapter_registry() {
-    use runtime_interaction::{AdapterRegistry, AdapterDescriptor, AdapterKind, AdapterResult};
+    use runtime_interaction::{AdapterRegistry, AdapterKind};
     use runtime_adapters_http::HttpAdapter;
     use runtime_mcp::{McpAdapter, DefaultMcpServer};
     use runtime_observability::TraceObservability;
@@ -30,22 +28,22 @@ async fn scale_multi_tab_and_adapter_registry() {
 
 #[tokio::test]
 async fn scale_scheduler_backpressure_and_cancel() {
-    use runtime_core::{RuntimeKernel, TaskContext, scheduler::Scheduler};
+    use runtime_core::{TaskContext, scheduler::Scheduler};
     use runtime_sandbox::ResourceQuota;
     use runtime_policy::PolicyEngine;
-    use runtime_observability::TraceObservability;
+    
 
-    let sched = Scheduler::new(2);
+    let sched = Scheduler::new(2, 2);
     let ctx = TaskContext::new(uuid::Uuid::new_v4(), None, ResourceQuota::default(), Arc::new(PolicyEngine::new()));
-    let h1 = sched.submit(ctx.clone()).await.expect("submit 1");
+    let _h1 = sched.submit(ctx.clone()).await.expect("submit 1");
     // Just verify submission doesn't deadlock or panic; result may not complete instantly.
     sched.cancel(ctx.task_id);
 }
 
 #[tokio::test]
 async fn scale_worker_pool_quota_and_memory() {
-    use runtime_core::worker::{WorkerPool, QuotaExceeded};
-    use runtime_sandbox::{ResourceQuota, ResourceUsage};
+    use runtime_core::worker::WorkerPool;
+    use runtime_sandbox::ResourceUsage;
 
     let pool = WorkerPool::new();
     let id = uuid::Uuid::new_v4();

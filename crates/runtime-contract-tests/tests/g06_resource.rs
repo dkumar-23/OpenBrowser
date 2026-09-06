@@ -5,7 +5,7 @@
 
 use runtime_core::{Scheduler, TaskContext};
 
-use runtime_sandbox::{ResourceQuota, ResourceUsage};
+use runtime_sandbox::ResourceQuota;
 use std::sync::Arc;
 
 #[tokio::test]
