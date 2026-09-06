@@ -2,9 +2,8 @@ use std::sync::Arc;
 use runtime_core::{RuntimeKernel, TaskContext};
 use runtime_auth::{AgentIdentity, HumanId};
 use runtime_policy::{PolicyEngine, Capability, Scope, CapabilitySet};
-use runtime_interaction::{AdapterRegistry, AdapterParams, AdapterResult, InteractionAdapter, AdapterDescriptor, AdapterKind, TaskInfo};
+use runtime_interaction::{AdapterRegistry, AdapterParams, AdapterResult, InteractionAdapter, TaskInfo};
 use runtime_adapters_http::HttpAdapter;
-use runtime_interaction::AdapterDescriptor as Desc; // alias not needed; using full path
 use runtime_mcp::{McpAdapter, DefaultMcpServer};
 use runtime_observability::{init_tracing, TraceObservability, Observability, TraceContext};
 use runtime_sandbox::ResourceQuota;

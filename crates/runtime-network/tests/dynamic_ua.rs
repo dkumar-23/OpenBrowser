@@ -5,7 +5,7 @@
 //! - Multiple UAs on same HttpClient
 //! - Default UA when no override
 
-use runtime_network::{HttpClient, Request, Method};
+use runtime_network::{Request, Method};
 
 #[tokio::test]
 async fn test_dynamic_ua_per_request() {

@@ -13,7 +13,6 @@ use runtime_interaction::{
 };
 use runtime_auth::AgentIdentity;
 use runtime_policy::{PolicyEngine, CapabilitySet, Decision};
-use runtime_agent::CapabilityResult;
 use runtime_observability::{Observability, ReplayEvent};
 
 /// MCP server interface — hosts capabilities to external MCP clients.

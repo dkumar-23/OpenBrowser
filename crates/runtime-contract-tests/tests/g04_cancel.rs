@@ -4,7 +4,6 @@
 //! execution state reaches Cancelled, resources released.
 
 use runtime_core::{Scheduler, TaskContext};
-use runtime_policy::PolicyEngine;
 use std::sync::Arc;
 
 #[tokio::test]

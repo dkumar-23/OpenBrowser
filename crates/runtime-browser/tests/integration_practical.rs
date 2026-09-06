@@ -8,7 +8,7 @@
 //! over runtime-dom + runtime-network + tokio timers.
 
 use runtime_browser::{
-    Browser, NavigationResult, FormData, FetchRequest,
+    Browser, FormData, FetchRequest,
     TimerHandle, IntervalHandle,
 };
 use std::collections::HashMap;

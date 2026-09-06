@@ -4,7 +4,6 @@
 //! max_concurrent.
 
 use runtime_core::{Scheduler, TaskContext};
-use runtime_policy::PolicyEngine;
 use std::sync::Arc;
 
 #[tokio::test]

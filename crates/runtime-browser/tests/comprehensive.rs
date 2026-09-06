@@ -14,7 +14,6 @@
 
 use runtime_browser::{
     Browser, FormData, FormSubmitOptions, FetchRequest,
-    NavigationResult,
 };
 use runtime_network::{HttpClient, Method};
 use std::collections::HashMap;

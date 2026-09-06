@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use runtime_auth::{AgentIdentity, CredentialBroker};
 use runtime_policy::{CapabilitySet, PolicyEngine, Decision};
 use runtime_interaction::{
-    TaskInfo, AdapterParams, AdapterResult, AdapterKind, AdapterDescriptor,
+    TaskInfo, AdapterParams, AdapterKind,
 };
 use runtime_observability::{Observability, ReplayEvent};
 use serde::{Serialize, Deserialize};
@@ -229,8 +229,8 @@ impl SemanticCapability for SearchWebCapability {
             }
             Decision::Allow => {}
         }
-        // 2. Build params
-        let params = match self.build_params(&input) {
+        // 2. Build params (validated; real dispatch goes through the adapter registry)
+        let _params = match self.build_params(&input) {
             Ok(p) => p,
             Err(e) => {
                 let seq = record_outcome(&observability, &info, &agent, "capability_error", &format!("search_web: {}", e));
@@ -391,7 +391,7 @@ impl AuthenticateCapability {
             "token_id": token_id,
             "note": "authenticate executed with broker",
             "params_url": match params {
-                AdapterParams::Http { ref url, body, headers, .. } => url.clone(),
+                AdapterParams::Http { ref url, .. } => url.clone(),
                 _ => String::new(),
             },
         });
@@ -589,10 +589,11 @@ mod tests {
         let input = serde_json::json!({"query":"rust programming","engine":"duckduckgo"});
         let params = cap.build_params(&input).unwrap();
         match params {
-            AdapterParams::Http {  url, method, body: None, headers: Default::default() } => {
+            AdapterParams::Http {  url, method, body: None, headers } => {
                 assert!(url.contains("duckduckgo"));
                 assert!(url.contains("rust%20programming") || url.contains("rust programming"));
                 assert_eq!(method.as_deref(), Some("GET"));
+                assert!(headers.is_empty());
             }, _ => panic!("expected Http params"),
         }
     }
