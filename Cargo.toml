@@ -24,7 +24,7 @@ rust-version = "1.75"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "process"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

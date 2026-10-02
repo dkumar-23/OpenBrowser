@@ -1,10 +1,13 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio::sync::RwLock;
 use uuid::Uuid;
-use runtime_sandbox::{ResourceQuota, WorkerGuard, ResourceUsage};
+use runtime_sandbox::{ResourceQuota, Watchdog, WorkerGuard, ResourceUsage};
 
 /// G7: Explicit worker lifecycle tracking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -174,6 +177,161 @@ impl std::error::Error for QuotaExceeded {}
 
 impl Default for WorkerPool {
     fn default() -> Self { Self::new() }
+}
+
+/// Description of the child program a [`ProcessWorkerPool`] runs. The pool is
+/// program-agnostic so any worker entrypoint (including
+/// [`run_worker_entrypoint`]) can be used.
+#[derive(Debug, Clone)]
+pub struct ProcessSpec {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+}
+
+impl ProcessSpec {
+    pub fn new(program: impl Into<PathBuf>) -> Self {
+        Self { program: program.into(), args: Vec::new() }
+    }
+
+    pub fn arg(mut self, arg: impl Into<String>) -> Self {
+        self.args.push(arg.into());
+        self
+    }
+
+    pub fn args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.args.extend(args.into_iter().map(Into::into));
+        self
+    }
+}
+
+/// Terminal outcome of one process-isolated task execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProcessOutcome {
+    Success { stdout: String },
+    Failed { code: Option<i32>, stderr: String },
+    ResourceExceeded { reason: String },
+}
+
+/// Process-isolated worker pool: each task runs in a child process, its
+/// wall-clock quota is enforced as a hard kill, and a crash/kill of one child
+/// never affects the pool. Quota bookkeeping reuses [`WorkerPool`]'s
+/// [`WorkerGuard`] and the sandbox [`Watchdog`]; the actual OS termination is
+/// `kill_on_drop` plus the wall timeout.
+pub struct ProcessWorkerPool {
+    pool: Arc<WorkerPool>,
+}
+
+impl ProcessWorkerPool {
+    pub fn new() -> Self {
+        Self { pool: Arc::new(WorkerPool::new()) }
+    }
+
+    pub fn with_worker_pool(pool: Arc<WorkerPool>) -> Self {
+        Self { pool }
+    }
+
+    pub fn worker_pool(&self) -> Arc<WorkerPool> {
+        self.pool.clone()
+    }
+
+    /// Run `spec` in a child process under `quota`. A non-zero exit is
+    /// `Failed`; exceeding `max_wall_ms` is `ResourceExceeded`. The pool is
+    /// always left healthy.
+    pub async fn execute(
+        &self,
+        task_id: Uuid,
+        quota: ResourceQuota,
+        spec: ProcessSpec,
+    ) -> ProcessOutcome {
+        let cancel = CancellationToken::new();
+        self.pool.register(task_id, quota, cancel.clone()).await;
+        let _watchdog = Watchdog::arm(quota.max_wall_ms, cancel.clone());
+
+        let mut command = tokio::process::Command::new(&spec.program);
+        command
+            .args(&spec.args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+
+        let outcome = match command.spawn() {
+            Ok(child) => {
+                if quota.max_wall_ms > 0 {
+                    match tokio::time::timeout(
+                        Duration::from_millis(quota.max_wall_ms),
+                        child.wait_with_output(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(output)) => classify_process_output(output),
+                        Ok(Err(err)) => ProcessOutcome::Failed {
+                            code: None,
+                            stderr: format!("wait error: {err}"),
+                        },
+                        Err(_) => ProcessOutcome::ResourceExceeded {
+                            reason: "resource exceeded: wall clock budget".into(),
+                        },
+                    }
+                } else {
+                    match child.wait_with_output().await {
+                        Ok(output) => classify_process_output(output),
+                        Err(err) => ProcessOutcome::Failed {
+                            code: None,
+                            stderr: format!("wait error: {err}"),
+                        },
+                    }
+                }
+            }
+            Err(err) => ProcessOutcome::Failed {
+                code: None,
+                stderr: format!("spawn error: {err}"),
+            },
+        };
+
+        self.pool.remove(task_id).await;
+        outcome
+    }
+}
+
+impl Default for ProcessWorkerPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn classify_process_output(output: std::process::Output) -> ProcessOutcome {
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if output.status.success() {
+        ProcessOutcome::Success { stdout }
+    } else {
+        ProcessOutcome::Failed { code: output.status.code(), stderr }
+    }
+}
+
+/// Minimal in-process worker protocol used by the child-process entrypoint.
+/// Modes: `sleep <ms>`, `fail <code>`, `abort`, `echo <text>`. Returns the
+/// process exit code.
+pub async fn run_worker_entrypoint(args: &[String]) -> i32 {
+    match args.first().map(String::as_str) {
+        Some("sleep") => {
+            let ms = args.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+            0
+        }
+        Some("fail") => args.get(1).and_then(|s| s.parse::<i32>().ok()).unwrap_or(1),
+        Some("abort") => std::process::abort(),
+        Some("echo") => {
+            println!("{}", args.get(1).map(String::as_str).unwrap_or(""));
+            0
+        }
+        _ => 2,
+    }
 }
 
 #[cfg(test)]

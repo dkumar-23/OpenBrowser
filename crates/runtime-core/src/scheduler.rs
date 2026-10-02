@@ -7,9 +7,13 @@ use runtime_interaction::AdapterResult;
 use uuid::Uuid;
 
 /// Envelope carries task + oneshot sender so dispatcher can report result.
-struct TaskEnvelope {
-    context: TaskContext,
-    result_tx: oneshot::Sender<AdapterResult>,
+#[derive(Debug)]
+pub(crate) struct TaskEnvelope {
+    pub(crate) context: TaskContext,
+    pub(crate) result_tx: oneshot::Sender<AdapterResult>,
+    /// Optional global-capacity permit held for the task's full lifetime
+    /// (queued + running); released when dispatch completes.
+    pub(crate) global_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 /// A submitted task handle — allows cancellation and result retrieval.
@@ -72,6 +76,8 @@ pub struct Scheduler {
     observability: Option<Arc<dyn runtime_observability::Observability>>,
     worker_pool: Arc<crate::worker::WorkerPool>,
     usage_provider: Option<Arc<dyn Fn(Uuid) -> runtime_sandbox::ResourceUsage + Send + Sync>>,
+    broker: Option<Arc<crate::broker::TaskBroker>>,
+    global: Option<Arc<crate::broker::GlobalCapacity>>,
 }
 
 impl Scheduler {
@@ -90,7 +96,26 @@ impl Scheduler {
             observability: None,
             worker_pool: Arc::new(crate::worker::WorkerPool::new()),
             usage_provider: None,
+            broker: None,
+            global: None,
         }
+    }
+
+    /// Share a [`crate::broker::TaskBroker`] between schedulers. Every task
+    /// submitted through any scheduler sharing the broker is claimed and
+    /// executed by exactly one scheduler's dispatcher.
+    pub fn with_broker(mut self, broker: Arc<crate::broker::TaskBroker>) -> Self {
+        self.broker = Some(broker);
+        self
+    }
+
+    /// Attach a shared [`crate::broker::GlobalCapacity`]. A submitted task
+    /// holds one permit for its whole lifetime; submitting while the global
+    /// capacity is exhausted returns [`BackpressureError`] rather than
+    /// blocking or dropping the task.
+    pub fn with_global_capacity(mut self, capacity: Arc<crate::broker::GlobalCapacity>) -> Self {
+        self.global = Some(capacity);
+        self
     }
 
     pub fn with_observability(mut self, obs: Arc<dyn runtime_observability::Observability>) -> Self {
@@ -133,6 +158,20 @@ impl Scheduler {
             .expect("Scheduler::start called more than once");
         drop(rx_guard);
 
+        // Distributed scheduling: forward envelopes claimed from the shared
+        // broker into this scheduler's local queue. Exactly one scheduler
+        // wins each claim (atomic pop under the broker mutex).
+        if let Some(broker) = self.broker.clone() {
+            let tx = self.queue_tx.clone();
+            tokio::spawn(async move {
+                while let Some(envelope) = broker.claim().await {
+                    if tx.send(envelope).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+
         let metrics = self.metrics.clone();
         let observability = self.observability.clone();
         let concurrency_sem = self.concurrency_sem.clone();
@@ -143,7 +182,7 @@ impl Scheduler {
 
         let handle = tokio::spawn(async move {
             while let Some(envelope) = rx.recv().await {
-                let TaskEnvelope { context, result_tx } = envelope;
+                let TaskEnvelope { context, result_tx, global_permit } = envelope;
 
                 // Register cancellation token
                 {
@@ -163,6 +202,7 @@ impl Scheduler {
                 let usage_provider = usage_provider.clone();
 
                 tokio::spawn(async move {
+                    let _global_permit = global_permit;
                     let _permit = sem.acquire().await.ok();
                     let deadline = context.deadline;
                     // Phase 4.3: the quota wall budget joins the task deadline
@@ -205,10 +245,14 @@ impl Scheduler {
                         let _ = r.transition(crate::execution::ExecutionState::Running { worker_id: Uuid::new_v4() }).await;
                     }
                     // Count as running only after concurrency slot acquired
-                    {
+                    let queue_depth = {
                         let mut m = metrics_inner.write().unwrap();
                         m.queued = m.queued.saturating_sub(1);
                         m.running += 1;
+                        m.queued as f64
+                    };
+                    if let Some(obs) = obs_inner.as_ref() {
+                        obs.gauge("scheduler_queue_depth", queue_depth, &[]);
                     }
 
                     // Phase 4.3: register the task's worker/guard in the
@@ -368,34 +412,72 @@ impl Scheduler {
     }
 
     pub async fn submit(&self, task: TaskContext) -> Result<TaskHandle, BackpressureError> {
+        let global_permit = self.acquire_global()?;
         let permit = self.backpressure.acquire().await.map_err(|_| BackpressureError)?;
+        let (handle, envelope) = self.prepare(task, global_permit);
+        if let Some(broker) = &self.broker {
+            broker.push(envelope);
+        } else if self.queue_tx.send(envelope).await.is_err() {
+            drop(permit);
+            return Err(BackpressureError);
+        }
+        drop(permit);
+        self.inc_queued();
+        self.emit_queue_depth();
+        Ok(handle)
+    }
+
+    /// Non-blocking variant of [`Scheduler::submit`]: if the local backpressure
+    /// slot or the shared [`crate::broker::GlobalCapacity`] is exhausted it
+    /// returns [`BackpressureError`] immediately instead of blocking.
+    pub async fn try_submit(&self, task: TaskContext) -> Result<TaskHandle, BackpressureError> {
+        let global_permit = self.acquire_global()?;
+        let permit = self
+            .backpressure
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| BackpressureError)?;
+        let (handle, envelope) = self.prepare(task, global_permit);
+        if let Some(broker) = &self.broker {
+            broker.push(envelope);
+        } else if self.queue_tx.try_send(envelope).is_err() {
+            drop(permit);
+            return Err(BackpressureError);
+        }
+        drop(permit);
+        self.inc_queued();
+        self.emit_queue_depth();
+        Ok(handle)
+    }
+
+    /// Build the handle + envelope and register execution/cancellation state.
+    fn prepare(
+        &self,
+        task: TaskContext,
+        global_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    ) -> (TaskHandle, TaskEnvelope) {
         let (result_tx, result_rx) = oneshot::channel();
-        // Register execution record
         let rec = Arc::new(crate::execution::ExecutionRecord::new(task.task_id));
         {
             let mut er = self.execution_records.lock().unwrap();
-            er.insert(task.task_id, rec.clone());
+            er.insert(task.task_id, rec);
         }
-        // Register cancellation
         {
             let mut reg = self.cancellation_registry.lock().unwrap();
             reg.insert(task.task_id, task.cancel.clone());
         }
         let task_id = task.task_id;
         let cancel_token = task.cancel.clone();
-        let envelope = TaskEnvelope { context: task, result_tx };
-        if self.queue_tx.send(envelope).await.is_err() {
-            drop(permit);
-            return Err(BackpressureError);
+        let envelope = TaskEnvelope { context: task, result_tx, global_permit };
+        let handle = TaskHandle { task_id, cancel: cancel_token, result: result_rx };
+        (handle, envelope)
+    }
+
+    fn acquire_global(&self) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, BackpressureError> {
+        match &self.global {
+            Some(capacity) => capacity.try_acquire().map(Some),
+            None => Ok(None),
         }
-        drop(permit);
-        self.inc_queued();
-        let handle = TaskHandle {
-            task_id,
-            cancel: cancel_token,
-            result: result_rx,
-        };
-        Ok(handle)
     }
 
     pub fn cancel(&self, task_id: Uuid) -> bool {
@@ -422,6 +504,15 @@ impl Scheduler {
     fn inc_cancelled(&self) {
         let mut m = self.metrics.write().unwrap();
         m.cancelled += 1;
+    }
+
+    /// R6: report the current queue depth as a real gauge on the shared
+    /// Observability/metric channel (no separate channel).
+    fn emit_queue_depth(&self) {
+        if let Some(obs) = &self.observability {
+            let depth = self.metrics.read().unwrap().queued as f64;
+            obs.gauge("scheduler_queue_depth", depth, &[]);
+        }
     }
 }
 

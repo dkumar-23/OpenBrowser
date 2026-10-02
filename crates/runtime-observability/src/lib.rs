@@ -55,6 +55,10 @@ pub trait Observability: Send + Sync + std::fmt::Debug {
     fn log_structured(&self, level: LogLevel, event: &str, ctx: &TraceContext, kv: &[(&str, &str)]);
     fn trace_span(&self, span: &str, ctx: &TraceContext);
     fn metric(&self, name: &str, value: f64, kv: &[(&str, &str)]);
+    /// R6: emit a point-in-time gauge (e.g. queue depth) through the same
+    /// `metrics` channel as `metric`. Default is a no-op so existing
+    /// implementors remain source-compatible.
+    fn gauge(&self, _name: &str, _value: f64, _kv: &[(&str, &str)]) {}
     fn record_replay(&self, event: ReplayEvent) -> u64;
     /// G13: record a lifecycle event.
     fn record_lifecycle(&self, event: LifecycleEvent);
@@ -141,6 +145,16 @@ impl Observability for TraceObservability {
             .map(|(k, v)| metrics::Label::new(k.to_string(), v.to_string()))
             .collect();
         metrics::counter!(owned, labels).increment(value as u64);
+    }
+
+    // R6 FIX: gauges go through the same metrics crate channel as counters.
+    fn gauge(&self, name: &str, value: f64, kv: &[(&str, &str)]) {
+        let owned = name.to_string();
+        let labels: Vec<metrics::Label> = kv
+            .iter()
+            .map(|(k, v)| metrics::Label::new(k.to_string(), v.to_string()))
+            .collect();
+        metrics::gauge!(owned, labels).set(value);
     }
 
     // CF-3 FIX: record_replay now writes to JSONL file.

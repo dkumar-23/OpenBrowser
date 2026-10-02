@@ -9,9 +9,11 @@ use runtime_auth::AgentIdentity;
 pub mod scheduler;
 pub mod worker;
 pub mod execution;
+pub mod broker;
 
-pub use scheduler::{Scheduler, SchedulerMetrics};
+pub use scheduler::{Scheduler, SchedulerMetrics, BackpressureError};
 pub use worker::WorkerPool;
+pub use broker::{TaskBroker, GlobalCapacity};
 pub use execution::{ExecutionState, ExecutionRecord};
 
 /// Every task carries full context through the runtime — trace/observability requirement.
