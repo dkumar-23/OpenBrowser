@@ -34,7 +34,7 @@ async fn main() {
     let _adapter_for_request = registry.resolve("http.get").expect("registry: no adapter for 'http.get'");
 
     // Create agent with CapabilitySet
-    let human = HumanId::default();
+    let human = HumanId::new();
     let agent = AgentIdentity::new(human);
     let mut caps = CapabilitySet::new();
     caps.grant(Capability::new("http.get", Scope::All, Some(3600)));

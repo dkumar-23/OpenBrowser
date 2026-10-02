@@ -11,8 +11,26 @@ mod tests {
     use runtime_auth::{AgentIdentity, HumanId};
 
     fn make_agent() -> AgentIdentity {
-        AgentIdentity::new(HumanId::default())
+        AgentIdentity::new(HumanId::new())
     }
+
+    #[test]
+    fn test_nil_human_is_denied() {
+        let mut policy = PolicyEngine::new();
+        policy.add_capability("http.get");
+
+        let agent = AgentIdentity::new(HumanId::nil());
+        let mut caps = CapabilitySet::new();
+        caps.grant(Capability::new("http.get", Scope::All, None));
+
+        match policy.check_with_caps(&agent, &caps, "http.get") {
+            Decision::Deny { reason } => {
+                assert!(reason.contains("human"), "expected nil-human denial, got: {reason}")
+            }
+            Decision::Allow => panic!("nil-human identity must be denied"),
+        }
+    }
+
 
     // -------------------------------------------------------------------------
     // §6 Test 1: check_with_caps ALLOWS when CapabilitySet has the action
@@ -71,5 +89,161 @@ mod tests {
             }
         };
         assert!(denied, "expected Deny variant");
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 4: scope enforcement in check_with_caps
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_read_scope_cannot_authorize_write_class_action() {
+        let mut policy = PolicyEngine::new();
+        policy.add_capability("http.post");
+
+        let agent = make_agent();
+        let mut caps = CapabilitySet::new();
+        caps.grant(Capability::new("http.post", Scope::Read, None));
+
+        match policy.check_with_caps(&agent, &caps, "http.post") {
+            Decision::Deny { reason } => {
+                assert!(
+                    reason.contains("capability"),
+                    "read-scope cap on write-class action must deny, got: {reason}"
+                );
+            }
+            Decision::Allow => panic!("Read-scope capability must NOT authorize a write-class action"),
+        }
+    }
+
+    #[test]
+    fn test_write_scope_authorizes_read_class_action() {
+        let mut policy = PolicyEngine::new();
+        policy.add_capability("http.get");
+
+        let agent = make_agent();
+        let mut caps = CapabilitySet::new();
+        caps.grant(Capability::new("http.get", Scope::Write, None));
+
+        assert!(matches!(
+            policy.check_with_caps(&agent, &caps, "http.get"),
+            Decision::Allow
+        ));
+    }
+
+    #[test]
+    fn test_all_scope_covers_write_class_action() {
+        let mut policy = PolicyEngine::new();
+        policy.add_capability("http.post");
+
+        let agent = make_agent();
+        let mut caps = CapabilitySet::new();
+        caps.grant(Capability::new("http.post", Scope::All, None));
+
+        assert!(matches!(
+            policy.check_with_caps(&agent, &caps, "http.post"),
+            Decision::Allow
+        ));
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 4: policy_ref cross-check
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_policy_ref_covering_namespace_allows() {
+        let mut policy = PolicyEngine::new();
+        policy.add_capability("http.get");
+
+        let agent = make_agent();
+        let mut caps = CapabilitySet::new();
+        caps.grant(Capability::new("http.get", Scope::All, None).with_policy_ref("http"));
+
+        assert!(matches!(
+            policy.check_with_caps(&agent, &caps, "http.get"),
+            Decision::Allow
+        ));
+    }
+
+    #[test]
+    fn test_policy_ref_mismatching_namespace_denies() {
+        let mut policy = PolicyEngine::new();
+        policy.add_capability("http.get");
+
+        let agent = make_agent();
+        let mut caps = CapabilitySet::new();
+        caps.grant(Capability::new("http.get", Scope::All, None).with_policy_ref("dom"));
+
+        assert!(matches!(
+            policy.check_with_caps(&agent, &caps, "http.get"),
+            Decision::Deny { .. }
+        ));
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 4: delegation chain coherence + expiry in check()
+    // -------------------------------------------------------------------------
+    #[test]
+    fn test_incoherent_delegation_chain_denies() {
+        let mut policy = PolicyEngine::new();
+        policy.add_capability("http.get");
+
+        let mut agent = make_agent();
+        agent.delegation_chain.links = vec![
+            runtime_auth::DelegationLink {
+                from: runtime_auth::AgentId::new(),
+                to: runtime_auth::AgentId::new(),
+                granted_at: chrono::Utc::now(),
+                expires_at: None,
+            },
+            runtime_auth::DelegationLink {
+                from: runtime_auth::AgentId::new(),
+                to: agent.agent_id,
+                granted_at: chrono::Utc::now(),
+                expires_at: None,
+            },
+        ];
+
+        match policy.check(&agent, "http.get") {
+            Decision::Deny { reason } => {
+                assert!(reason.contains("incoherent"), "expected incoherent-chain denial, got: {reason}");
+            }
+            Decision::Allow => panic!("broken delegation chain must be denied"),
+        }
+    }
+
+    #[test]
+    fn test_expired_delegation_chain_denies() {
+        let mut policy = PolicyEngine::new();
+        policy.add_capability("http.get");
+
+        let mut agent = make_agent();
+        agent.delegation_chain.links = vec![runtime_auth::DelegationLink {
+            from: runtime_auth::AgentId(agent.human.0),
+            to: agent.agent_id,
+            granted_at: chrono::Utc::now(),
+            expires_at: Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
+        }];
+
+        match policy.check(&agent, "http.get") {
+            Decision::Deny { reason } => {
+                assert!(reason.contains("expired"), "expected expiry denial, got: {reason}");
+            }
+            Decision::Allow => panic!("expired delegation chain must be denied"),
+        }
+    }
+
+    #[test]
+    fn test_coherent_chain_allows() {
+        let mut policy = PolicyEngine::new();
+        policy.add_capability("http.get");
+
+        let mut agent = make_agent();
+        let root = runtime_auth::AgentId(agent.human.0);
+        agent.delegation_chain.links = vec![runtime_auth::DelegationLink {
+            from: root,
+            to: agent.agent_id,
+            granted_at: chrono::Utc::now(),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::seconds(3600)),
+        }];
+
+        assert!(matches!(policy.check(&agent, "http.get"), Decision::Allow));
     }
 }

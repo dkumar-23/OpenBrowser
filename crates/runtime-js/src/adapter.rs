@@ -123,7 +123,7 @@ mod tests {
         let agent = make_identity();
         let info = runtime_interaction::TaskInfo::new(uuid::Uuid::new_v4(), agent.agent_id.0);
         let mut caps = CapabilitySet::new();
-        caps.grant(runtime_policy::Capability::new("schedule", runtime_policy::Scope::Read, None));
+        caps.grant(runtime_policy::Capability::new("schedule", runtime_policy::Scope::All, None));
         let obs = Arc::new(runtime_observability::TraceObservability::without_replay());
         let policy = Arc::new({
             let mut p = runtime_policy::PolicyEngine::new();

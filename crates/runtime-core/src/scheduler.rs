@@ -37,10 +37,27 @@ pub struct SchedulerMetrics {
     pub completed: usize,
     pub failed: usize,
     pub cancelled: usize,
+    pub timed_out: usize,
+    pub resource_exceeded: usize,
 }
 
-/// Scheduler with bounded queue, backpressure, cancellation, and dispatch loop.
+/// How often the quota monitor polls the usage provider for running tasks.
+const QUOTA_TICK_MS: u64 = 25;
+
+/// Scheduler with bounded queue, backpressure, cancellation, quota
+/// enforcement, and dispatch loop.
 /// Designed for 100x-1000x agent scale: independent task slots, no global lock.
+///
+/// Quota semantics (Phase 4.3): `TaskContext.quota` is enforced on the
+/// dispatch path through the WorkerPool — the task is registered as a worker
+/// on start, a monitor ticks the usage provider into the pool guard and
+/// hard-cancels on enforcement failure, and the `max_wall_ms` budget joins
+/// the task deadline as a single wall-clock limit. An all-zero quota means
+/// unlimited: no monitor is armed and no wall budget applies.
+///
+/// Memory/CPU/network/request enforcement requires a usage provider injected
+/// via [`Scheduler::with_usage_provider`]; without one those quota fields are
+/// not enforced (see that method's documentation).
 pub struct Scheduler {
     queue_tx: mpsc::Sender<TaskEnvelope>,
     queue_rx: Arc<std::sync::Mutex<Option<mpsc::Receiver<TaskEnvelope>>>>,
@@ -53,6 +70,8 @@ pub struct Scheduler {
     cancellation_registry: Arc<std::sync::Mutex<std::collections::HashMap<Uuid, tokio_util::sync::CancellationToken>>>,
     execution_records: Arc<std::sync::Mutex<std::collections::HashMap<Uuid, Arc<crate::execution::ExecutionRecord>>>>,
     observability: Option<Arc<dyn runtime_observability::Observability>>,
+    worker_pool: Arc<crate::worker::WorkerPool>,
+    usage_provider: Option<Arc<dyn Fn(Uuid) -> runtime_sandbox::ResourceUsage + Send + Sync>>,
 }
 
 impl Scheduler {
@@ -69,11 +88,37 @@ impl Scheduler {
             cancellation_registry: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             execution_records: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             observability: None,
+            worker_pool: Arc::new(crate::worker::WorkerPool::new()),
+            usage_provider: None,
         }
     }
 
     pub fn with_observability(mut self, obs: Arc<dyn runtime_observability::Observability>) -> Self {
         self.observability = Some(obs);
+        self
+    }
+
+    /// Share a WorkerPool with the scheduler: registered tasks' quota state
+    /// lives in this pool, and `pool.cancel(task_id)` hard-cancels them.
+    pub fn with_worker_pool(mut self, pool: Arc<crate::worker::WorkerPool>) -> Self {
+        self.worker_pool = pool;
+        self
+    }
+
+    /// Provide per-task resource usage estimates: the quota monitor polls
+    /// `provider(task_id)` on every tick and accumulates the delta into the
+    /// WorkerPool guard.
+    ///
+    /// **Enforcement depends on this provider.** When no provider is injected
+    /// (the default), the non-wall quota fields — `max_memory_bytes`,
+    /// `max_cpu_ms`, `max_network_bytes`, `max_requests` — are **not
+    /// enforced**: the monitor observes only zeros, so a task declaring such
+    /// limits runs without them. The `max_wall_ms` budget and the task
+    /// deadline remain actively enforced because they are driven by timers,
+    /// not by the provider. Inject a provider to enforce the other
+    /// dimensions.
+    pub fn with_usage_provider(mut self, provider: Arc<dyn Fn(Uuid) -> runtime_sandbox::ResourceUsage + Send + Sync>) -> Self {
+        self.usage_provider = Some(provider);
         self
     }
 
@@ -93,6 +138,8 @@ impl Scheduler {
         let concurrency_sem = self.concurrency_sem.clone();
         let cancellation_registry = self.cancellation_registry.clone();
         let execution_records = self.execution_records.clone();
+        let worker_pool = self.worker_pool.clone();
+        let usage_provider = self.usage_provider.clone();
 
         let handle = tokio::spawn(async move {
             while let Some(envelope) = rx.recv().await {
@@ -112,13 +159,29 @@ impl Scheduler {
                 let obs_clone_for_spawn = observability.clone();
                 let task_id = context.task_id;
                 let executor_inner = executor.clone();
+                let pool = worker_pool.clone();
+                let usage_provider = usage_provider.clone();
 
                 tokio::spawn(async move {
                     let _permit = sem.acquire().await.ok();
                     let deadline = context.deadline;
+                    // Phase 4.3: the quota wall budget joins the task deadline
+                    // into ONE wall-clock limit (existing timeout pattern, no
+                    // parallel timers). quota.max_wall_ms == 0 = unlimited.
+                    let quota_wall = if context.quota.max_wall_ms > 0 { Some(context.quota.max_wall_ms) } else { None };
+                    let effective_deadline = match (deadline, quota_wall) {
+                        (Some(a), Some(b)) => Some(a.min(b)),
+                        (a, b) => a.or(b),
+                    };
+                    // When both limits are set, the smaller one fired; equal
+                    // limits are classified as the task deadline (TimedOut).
+                    let quota_wall_breach = quota_wall.map_or(false, |q| deadline.map_or(true, |d| q < d));
+                    let enforce_quota = context.quota != runtime_sandbox::ResourceQuota::default();
                     let cancel_token = context.cancel.clone();
                     let exec_record_clone = exec_recs.clone();
                     let obs_inner = obs_clone_for_spawn.as_ref().cloned();
+                    let breach: Arc<std::sync::Mutex<Option<String>>> =
+                        Arc::new(std::sync::Mutex::new(None));
 
                     // Emit lifecycle: started
                     if let Some(obs) = obs_inner.as_ref() {
@@ -148,20 +211,67 @@ impl Scheduler {
                         m.running += 1;
                     }
 
-                    let result = if let Some(deadline_millis) = deadline {
-                        let deadline_instant = std::time::Instant::now() + std::time::Duration::from_millis(deadline_millis);
-                        match tokio::time::timeout_at(deadline_instant.into(), executor_inner(context.clone())).await {
-                            Ok(result) => result,
-                            Err(_) => {
-                                cancel_token.cancel();
-                                let rec_clone = {
-                                    let guard = exec_record_clone.lock().unwrap();
-                                    guard.get(&task_id).cloned()
-                                };
-                                if let Some(r2) = rec_clone {
-                                    let _ = r2.transition(crate::execution::ExecutionState::TimedOut).await;
+                    // Phase 4.3: register the task's worker/guard in the
+                    // WorkerPool — quota state lives in the pool, no
+                    // duplicate bookkeeping. Pool cancel() hard-cancels via
+                    // the shared token.
+                    pool.register(task_id, context.quota, cancel_token.clone()).await;
+
+                    // Phase 4.3: quota usage monitor. Ticks the usage provider
+                    // into the pool guard and hard-cancels on enforcement
+                    // failure. Only armed when the task has a nonzero quota:
+                    // an all-zero quota means unlimited.
+                    let monitor = if enforce_quota {
+                        let pool_m = pool.clone();
+                        let token_m = cancel_token.clone();
+                        let provider_m = usage_provider.clone();
+                        let breach_m = breach.clone();
+                        Some(tokio::spawn(async move {
+                            let mut ticker = tokio::time::interval(std::time::Duration::from_millis(QUOTA_TICK_MS));
+                            ticker.tick().await; // first tick fires immediately — skip it
+                            loop {
+                                ticker.tick().await;
+                                if token_m.is_cancelled() { break; }
+                                let delta = provider_m.as_ref().map(|p| p(task_id)).unwrap_or_default();
+                                if delta != runtime_sandbox::ResourceUsage::default() {
+                                    pool_m.add_usage(task_id, delta).await;
                                 }
-                                AdapterResult::Error { message: "deadline exceeded".into(), replay_sequence: 0 }
+                                if !pool_m.check_enforcement(task_id).await {
+                                    let dim = pool_m.breach_reason(task_id).await.unwrap_or("quota");
+                                    *breach_m.lock().unwrap() = Some(format!("resource exceeded: {}", dim));
+                                    token_m.cancel();
+                                    break;
+                                }
+                            }
+                        }))
+                    } else { None };
+
+                    let result = if let Some(deadline_millis) = effective_deadline {
+                        let deadline_instant = std::time::Instant::now() + std::time::Duration::from_millis(deadline_millis);
+                        tokio::select! {
+                            r = executor_inner(context.clone()) => r,
+                            _ = cancel_token.cancelled() => {
+                                let reason = breach.lock().unwrap().clone();
+                                match reason {
+                                    Some(msg) => {
+                                        transition_to(&exec_record_clone, task_id, crate::execution::ExecutionState::ResourceExceeded).await;
+                                        AdapterResult::Error { message: msg, replay_sequence: 0 }
+                                    }
+                                    None => {
+                                        transition_to(&exec_record_clone, task_id, crate::execution::ExecutionState::Cancelled).await;
+                                        AdapterResult::Error { message: "cancelled".into(), replay_sequence: 0 }
+                                    }
+                                }
+                            }
+                            _ = tokio::time::sleep_until(deadline_instant.into()) => {
+                                cancel_token.cancel();
+                                if quota_wall_breach {
+                                    transition_to(&exec_record_clone, task_id, crate::execution::ExecutionState::ResourceExceeded).await;
+                                    AdapterResult::Error { message: "resource exceeded: wall clock budget".into(), replay_sequence: 0 }
+                                } else {
+                                    transition_to(&exec_record_clone, task_id, crate::execution::ExecutionState::TimedOut).await;
+                                    AdapterResult::Error { message: "deadline exceeded".into(), replay_sequence: 0 }
+                                }
                             }
                         }
                     } else {
@@ -169,26 +279,30 @@ impl Scheduler {
                         tokio::select! {
                             r = executor_inner(context.clone()) => r,
                             _ = cancel_token.cancelled() => {
-                                // Transition to Cancelled
-                                let rec_clone = {
-                                    let guard = exec_record_clone.lock().unwrap();
-                                    guard.get(&task_id).cloned()
-                                };
-                                if let Some(r2) = rec_clone {
-                                    let _ = r2.transition(crate::execution::ExecutionState::Cancelled).await;
+                                let reason = breach.lock().unwrap().clone();
+                                match reason {
+                                    Some(msg) => {
+                                        transition_to(&exec_record_clone, task_id, crate::execution::ExecutionState::ResourceExceeded).await;
+                                        AdapterResult::Error { message: msg, replay_sequence: 0 }
+                                    }
+                                    None => {
+                                        transition_to(&exec_record_clone, task_id, crate::execution::ExecutionState::Cancelled).await;
+                                        AdapterResult::Error { message: "cancelled".into(), replay_sequence: 0 }
+                                    }
                                 }
-                                AdapterResult::Error { message: "cancelled".into(), replay_sequence: 0 }
                             }
                         }
                     };
                     let succeeded;
                     let is_cancelled;
                     let is_timed_out;
+                    let is_resource_exceeded;
                     {
                         use runtime_interaction::AdapterResult;
                         succeeded = matches!(result, AdapterResult::Success { .. });
                         is_cancelled = matches!(&result, AdapterResult::Error { message, .. } if message == "cancelled");
                         is_timed_out = matches!(&result, AdapterResult::Error { message, .. } if message == "deadline exceeded");
+                        is_resource_exceeded = matches!(&result, AdapterResult::Error { message, .. } if message.starts_with("resource exceeded"));
                     }
                     let _ = result_tx.send(result);
                     // Emit lifecycle: terminal state
@@ -196,6 +310,7 @@ impl Scheduler {
                         let evt_type = if succeeded { "completed" }
                             else if is_cancelled { "cancelled" }
                             else if is_timed_out { "timed_out" }
+                            else if is_resource_exceeded { "resource_exceeded" }
                             else { "failed" };
                         let evt = runtime_observability::LifecycleEvent {
                             task_id,
@@ -215,7 +330,9 @@ impl Scheduler {
                         } else if is_cancelled {
                             m.cancelled += 1;
                         } else if is_timed_out {
-                            // timed out tracked separately
+                            m.timed_out += 1;
+                        } else if is_resource_exceeded {
+                            m.resource_exceeded += 1;
                         } else {
                             m.failed += 1;
                         }
@@ -232,6 +349,12 @@ impl Scheduler {
                             crate::execution::ExecutionState::Failed { error: "adapter error".into() }
                         };
                         let _ = r.transition(state).await;
+                    }
+                    // Phase 4.3: release quota bookkeeping — pool guard outlives
+                    // nothing, monitor is stopped, the pool survives for the next task.
+                    pool.remove(task_id).await;
+                    if let Some(mon) = monitor.as_ref() {
+                        mon.abort();
                     }
                     // Clean up registry
                     reg.lock().unwrap().remove(&task_id);
@@ -299,6 +422,19 @@ impl Scheduler {
     fn inc_cancelled(&self) {
         let mut m = self.metrics.write().unwrap();
         m.cancelled += 1;
+    }
+}
+
+/// Look up a task's execution record and transition it to `state`
+/// (invalid transitions are ignored — the record keeps its prior state).
+async fn transition_to(
+    records: &Arc<std::sync::Mutex<std::collections::HashMap<Uuid, Arc<crate::execution::ExecutionRecord>>>>,
+    task_id: Uuid,
+    state: crate::execution::ExecutionState,
+) {
+    let rec = records.lock().unwrap().get(&task_id).cloned();
+    if let Some(r) = rec {
+        let _ = r.transition(state).await;
     }
 }
 

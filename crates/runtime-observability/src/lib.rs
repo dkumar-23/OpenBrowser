@@ -132,11 +132,15 @@ impl Observability for TraceObservability {
         let _ = tracing::info_span!("work", span = %span, task_id = %ctx.task_id, agent_id = %ctx.agent_id);
     }
 
-    // CF-5 FIX: metric() now increments a counter via the metrics crate.
-    fn metric(&self, name: &str, value: f64, _kv: &[(&str, &str)]) {
-        // CF-5 FIX: emit metric via metrics crate counter
+    // CF-5 FIX: metric() now increments a counter via the metrics crate,
+    // forwarding the caller's key/value labels into the metric key.
+    fn metric(&self, name: &str, value: f64, kv: &[(&str, &str)]) {
         let owned = name.to_string();
-        metrics::counter!(owned).increment(value as u64);
+        let labels: Vec<metrics::Label> = kv
+            .iter()
+            .map(|(k, v)| metrics::Label::new(k.to_string(), v.to_string()))
+            .collect();
+        metrics::counter!(owned, labels).increment(value as u64);
     }
 
     // CF-3 FIX: record_replay now writes to JSONL file.

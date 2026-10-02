@@ -229,7 +229,7 @@ mod tests {
         let agent = make_identity();
         let info = runtime_interaction::TaskInfo::new(uuid::Uuid::new_v4(), agent.agent_id.0);
         let mut caps = runtime_policy::CapabilitySet::new();
-        caps.grant(runtime_policy::Capability::new("mcp.invoke", runtime_policy::Scope::Read, None));
+        caps.grant(runtime_policy::Capability::new("mcp.invoke", runtime_policy::Scope::All, None));
         let policy = Arc::new({
             let mut p = runtime_policy::PolicyEngine::new();
             p.add_capability("mcp.invoke");

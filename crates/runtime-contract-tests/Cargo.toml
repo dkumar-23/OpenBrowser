@@ -22,4 +22,5 @@ anyhow = { workspace = true }
 futures = { workspace = true }
 
 [dev-dependencies]
+metrics-util = "0.17"
 tempfile = "3"

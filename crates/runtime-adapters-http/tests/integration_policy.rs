@@ -11,7 +11,7 @@ use runtime_policy::{PolicyEngine, CapabilitySet, Capability, Scope};
 use uuid::Uuid;
 
 fn make_agent() -> AgentIdentity {
-    AgentIdentity::new(HumanId::default())
+    AgentIdentity::new(HumanId::new())
 }
 
 fn make_caps_with(action: &str) -> CapabilitySet {

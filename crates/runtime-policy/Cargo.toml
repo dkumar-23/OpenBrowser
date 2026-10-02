@@ -8,4 +8,6 @@ rust-version.workspace = true
 runtime-observability = { path = "../runtime-observability" }
 runtime-auth = { path = "../runtime-auth" }
 serde = { workspace = true }
+serde_json = { workspace = true }
 chrono = { workspace = true }
+uuid = { workspace = true }

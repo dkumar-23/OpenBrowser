@@ -382,8 +382,19 @@ impl AuthenticateCapability {
         let seq = record_outcome(&observability, &info, &agent, "authenticate_executed", "attempt");
         let token_id = if let Some(b) = &broker {
             let scope = input.get("scope").and_then(|v| v.as_str()).unwrap_or("default");
-            let handle = b.issue(&agent.agent_id, scope);
-            Some(hex_encode(&handle.opaque))
+            match b.issue_for_identity(&agent, scope, None) {
+                Ok(handle) => Some(hex_encode(&handle.opaque)),
+                Err(e) => {
+                    let seq = record_outcome(
+                        &observability,
+                        &info,
+                        &agent,
+                        "capability_denied",
+                        &format!("authenticate: {}", e),
+                    );
+                    return make_denied_result(&info, "authenticate", &e.to_string(), seq);
+                }
+            }
         } else { None };
         let data = serde_json::json!({
             "service": input.get("service").and_then(|v| v.as_str()).unwrap_or(""),

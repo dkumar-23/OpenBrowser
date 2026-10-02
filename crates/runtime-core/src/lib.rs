@@ -1,4 +1,4 @@
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use uuid::Uuid;
 use tokio_util::sync::CancellationToken;
 use runtime_observability::{TraceContext, Observability, ReplayEvent};
@@ -85,22 +85,26 @@ impl TaskContext {
 /// Runtime kernel — wires all Phase 1 crates together.
 pub struct RuntimeKernel {
     pub scheduler: Scheduler,
-    pub workers: Arc<RwLock<WorkerPool>>,
+    pub workers: Arc<WorkerPool>,
     pub observability: Arc<dyn Observability>,
     pub policy: Arc<PolicyEngine>,
 }
 
 impl RuntimeKernel {
     pub fn new(policy: Arc<PolicyEngine>, observability: Arc<dyn Observability>) -> Self {
+        let workers = Arc::new(WorkerPool::new());
         Self {
-            scheduler: Scheduler::new(1000, 100), // max 1000 queued, 100 concurrent
-            workers: Arc::new(RwLock::new(WorkerPool::new())),
+            scheduler: Scheduler::new(1000, 100) // max 1000 queued, 100 concurrent
+                .with_worker_pool(workers.clone()),
+            workers,
             observability,
             policy,
         }
     }
 
-    /// Enforce capability check before any task submission.
+    /// Enforce capability check before any task submission. The decision is
+    /// routed through the decision log: a `policy_decision` lifecycle event
+    /// plus a `policy_decision` metric, via the injected Observability only.
     pub fn check_capability(&self, agent: &AgentIdentity, action: &str) -> Decision {
         let d = self.policy.check(agent, action);
         self.observability.log_structured(
@@ -115,6 +119,26 @@ impl RuntimeKernel {
                 },
             ],
         );
+        let details = match &d {
+            runtime_policy::Decision::Allow => serde_json::json!({
+                "action": action,
+                "decision": "allow",
+            }),
+            runtime_policy::Decision::Deny { reason } => serde_json::json!({
+                "action": action,
+                "decision": "deny",
+                "reason": reason,
+            }),
+        };
+        self.observability.record_lifecycle(runtime_observability::LifecycleEvent {
+            task_id: Uuid::nil(),
+            agent_id: agent.agent_id.0,
+            delegation_id: None,
+            event_type: "policy_decision".into(),
+            timestamp: chrono::Utc::now(),
+            details: Some(details),
+        });
+        self.observability.metric("policy_decision", 1.0, &[("action", action)]);
         d
     }
 

@@ -90,6 +90,20 @@ impl WorkerPool {
         Ok(handle)
     }
 
+    /// Register a running task under quota enforcement WITHOUT spawning a
+    /// future: the scheduler owns the execution, the pool owns the quota
+    /// bookkeeping and can hard-cancel through the shared token.
+    pub async fn register(&self, task_id: Uuid, quota: ResourceQuota, cancel: CancellationToken) {
+        let guard = WorkerGuard::new(quota);
+        let state = WorkerState {
+            guard,
+            cancel,
+            handle: None,
+            status: WorkerStateStatus::Running,
+        };
+        self.workers.write().await.insert(task_id, state);
+    }
+
     /// Add resource usage delta to an active worker. Call this on each
     /// resource tick (network byte received, CPU cycle measured, etc.).
     /// CF-4 FIX: add_usage() is called by the scheduler/dispatcher on each
@@ -110,6 +124,12 @@ impl WorkerPool {
     pub async fn check_enforcement(&self, task_id: Uuid) -> bool {
         let guard = self.workers.read().await;
         guard.get(&task_id).map_or(false, |s| s.guard.enforce())
+    }
+
+    /// Which quota dimension a worker is currently breaching
+    /// (None when unbreached or unknown).
+    pub async fn breach_reason(&self, task_id: Uuid) -> Option<&'static str> {
+        self.workers.read().await.get(&task_id).map_or(None, |s| s.guard.breached_dimension())
     }
 
     pub async fn cancel(&self, task_id: Uuid) -> bool {

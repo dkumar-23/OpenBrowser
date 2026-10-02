@@ -5,6 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-runtime-observability = { path = "../runtime-observability" }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 serde = { workspace = true }
