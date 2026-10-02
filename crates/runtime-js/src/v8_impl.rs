@@ -23,13 +23,13 @@ use rusty_v8 as v8;
 #[cfg(feature = "v8")]
 use crate::{
     JsEngine, JsIsolate, JsQuota, JsValue, JsResult, JsError, CompiledModule,
-    JsIsolateBacking,
+    JsIsolateBacking, JsTier2Host, NoopJsTier2Host,
 };
 
 #[cfg(feature = "v8")]
 use std::sync::{Arc, Mutex};
 #[cfg(feature = "v8")]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // P1-A.2: Interrupt mechanism
@@ -412,12 +412,65 @@ impl V8IsolateData {
 
 /// V8-backed JavaScript engine. Implements `JsEngine` fully.
 #[cfg(feature = "v8")]
-#[derive(Debug, Default, Clone)]
-pub struct V8JsEngine;
+pub struct V8JsEngine {
+    /// Stable engine identity used to key the per-thread default isolate so
+    /// `execute` reuses one persistent context (globals survive across calls)
+    /// while independent engines remain isolated. Clones share the identity.
+    id: u64,
+    tier2: Arc<dyn JsTier2Host>,
+}
+
+#[cfg(feature = "v8")]
+impl Clone for V8JsEngine {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            tier2: Arc::clone(&self.tier2),
+        }
+    }
+}
+
+#[cfg(feature = "v8")]
+impl std::fmt::Debug for V8JsEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("V8JsEngine").field("id", &self.id).finish()
+    }
+}
+
+#[cfg(feature = "v8")]
+impl Default for V8JsEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "v8")]
+static NEXT_ENGINE_ID: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(feature = "v8")]
+thread_local! {
+    /// Per-thread default isolate keyed by engine identity. `OwnedIsolate` is
+    /// !Send, so the persistent context for `execute` lives on the calling
+    /// thread. Independent engines get independent contexts.
+    static ENGINE_DEFAULT_ISOLATES: std::cell::RefCell<
+        std::collections::HashMap<u64, V8IsolateData>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
 
 #[cfg(feature = "v8")]
 impl V8JsEngine {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self {
+            id: NEXT_ENGINE_ID.fetch_add(1, Ordering::SeqCst),
+            tier2: Arc::new(NoopJsTier2Host),
+        }
+    }
+
+    /// Attach a Tier 2 host (WebSocket / Worker / IndexedDB / WASM).
+    pub fn with_tier2_host(mut self, host: Arc<dyn JsTier2Host>) -> Self {
+        self.tier2 = host;
+        self
+    }
 }
 
 /// Initialize V8 once per process, thread-safely.
@@ -454,44 +507,23 @@ impl JsEngine for V8JsEngine {
         Ok(CompiledModule::from_source(source.to_string()))
     }
 
-    /// GAP 6: Execute re-compiles from stored source (Phase 2.1 approach).
-    /// Uses a fresh ephemeral isolate for isolation (doesn't use create_isolate
-    /// because module execution may need different quota than the module's original).
+    /// GAP 6 + persistent-context fix: execute re-compiles from stored source
+    /// and runs inside a per-engine, per-thread persistent isolate, so globals
+    /// set by one `execute` call survive into the next call on the same engine.
+    /// Independent engines and independent `JsIsolate`s created via
+    /// `create_isolate` remain fully isolated.
     fn execute(&self, module: &CompiledModule) -> Result<JsResult, JsError> {
         init_v8();
-        let mut isolate = v8::Isolate::new(Default::default());
-        let scope = &mut v8::HandleScope::new(&mut isolate);
-        let context = v8::Context::new(scope);
-        let scope = &mut v8::ContextScope::new(scope, context);
-
-        let tc_scope = &mut v8::TryCatch::new(scope);
-
-        let code = v8::String::new(tc_scope, &module.source)
-            .ok_or_else(|| JsError::CompileError("V8 string creation failed".into()))?;
-        let script = v8::Script::compile(tc_scope, code, None)
-            .ok_or_else(|| JsError::CompileError("compile failed".into()))?;
-
-        let start = std::time::Instant::now();
-        let value = script.run(tc_scope);
-        let elapsed_ms = start.elapsed().as_millis() as u64;
-
-        if tc_scope.has_caught() {
-            let exc = tc_scope.exception()
-                .map(|e| e.to_rust_string_lossy(tc_scope))
-                .unwrap_or_else(|| "unknown".into());
-            let msg = tc_scope.message()
-                .map(|m| m.get(tc_scope).to_rust_string_lossy(tc_scope))
-                .unwrap_or_default();
-            return Err(JsError::ExecuteError(format!("{} {}", msg, exc)));
-        }
-
-        let value = value.ok_or_else(|| JsError::ExecuteError("no result".into()))?;
-        let js_value = v8_value_to_js_value(value, tc_scope);
-
-        Ok(JsResult {
-            value: js_value,
-            error: None,
-            execution_time_ms: elapsed_ms,
+        ENGINE_DEFAULT_ISOLATES.with(|map| {
+            let mut map = map.borrow_mut();
+            if !map.contains_key(&self.id) {
+                let data = V8IsolateData::new(JsQuota::default())?;
+                map.insert(self.id, data);
+            }
+            let data = map
+                .get(&self.id)
+                .ok_or_else(|| JsError::IsolateError("default isolate missing".into()))?;
+            data.execute_script(module.source(), false, None)
         })
     }
 
@@ -550,6 +582,10 @@ impl JsEngine for V8JsEngine {
     }
 
     fn supports_isolates(&self) -> bool { true }
+
+    fn tier2_host(&self) -> Arc<dyn JsTier2Host> {
+        Arc::clone(&self.tier2)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1088,5 +1124,56 @@ mod v8_tests {
             let r = engine.execute_in_isolate(&iso, "1 + 1", Some(2_000));
             assert!(r.is_ok());
         }
+    }
+
+    /// Persistent-context fix: globals set through `execute` survive into the
+    /// next `execute` call on the same engine, across module re-compilation.
+    #[test]
+    fn test_v8_execute_persists_globals_across_recompilation() {
+        let engine = V8JsEngine::new();
+        let set_module = engine.compile("globalThis.__persisted = 42").expect("compile set");
+        engine.execute(&set_module).expect("execute set");
+
+        // A freshly compiled module reads the global set by the previous call.
+        let get_module = engine.compile("globalThis.__persisted").expect("compile get");
+        let res = engine.execute(&get_module).expect("execute get");
+        assert!(
+            matches!(res.value, JsValue::Number(n) if (n - 42.0).abs() < 0.001),
+            "expected persisted 42.0 across execute calls, got {:?}",
+            res.value
+        );
+    }
+
+    /// Independent engine instances must not share the default context.
+    #[test]
+    fn test_v8_execute_engines_are_isolated() {
+        let engine_a = V8JsEngine::new();
+        engine_a
+            .execute(&engine_a.compile("globalThis.__only_a = 7").unwrap())
+            .unwrap();
+
+        let engine_b = V8JsEngine::new();
+        let res = engine_b
+            .execute(&engine_b.compile("typeof globalThis.__only_a").unwrap())
+            .expect("execute b");
+        assert_eq!(res.value, JsValue::String("undefined".into()));
+    }
+
+    /// V8 with a fake host exposes Tier 2 operations; without one it returns
+    /// `Unsupported` gracefully.
+    #[test]
+    fn test_v8_tier2_host_default_and_injected() {
+        let engine = V8JsEngine::new();
+        assert!(matches!(
+            engine.tier2_host().websocket_open("ws://x"),
+            Err(JsError::Unsupported(_))
+        ));
+
+        let engine = V8JsEngine::new().with_tier2_host(Arc::new(crate::InMemoryTier2Host::new()));
+        let ws = engine.tier2_host().websocket_open("ws://echo").expect("open");
+        assert_eq!(
+            engine.tier2_host().websocket_send(&ws, "hello").expect("send"),
+            JsValue::String("hello".into())
+        );
     }
 }

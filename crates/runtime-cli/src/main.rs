@@ -5,6 +5,7 @@ use runtime_policy::{PolicyEngine, Capability, Scope, CapabilitySet};
 use runtime_interaction::{AdapterRegistry, AdapterParams, AdapterResult, InteractionAdapter, TaskInfo};
 use runtime_adapters_http::HttpAdapter;
 use runtime_mcp::{McpAdapter, DefaultMcpServer};
+use runtime_visual::VisualAdapter;
 use runtime_observability::{init_tracing, TraceObservability, Observability, TraceContext};
 use runtime_sandbox::ResourceQuota;
 
@@ -25,6 +26,8 @@ async fn main() {
     registry.register(Box::new(HttpAdapter::new(observability.clone(), policy.clone())));
     // Register MCP adapter (future-ready)
     registry.register(Box::new(McpAdapter::new(policy.clone(), observability.clone()).with_server(Box::new(DefaultMcpServer))));
+    // Register visual fallback adapter (lowest preference: HTTP > DOM > JS > MCP > Visual)
+    registry.register(Box::new(VisualAdapter::new(observability.clone(), policy.clone())));
 
     // Verify registry has both adapters
     assert!(registry.len() >= 2, "registry must contain at least Http + MCP adapter");

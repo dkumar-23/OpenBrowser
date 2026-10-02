@@ -234,6 +234,9 @@ mod tests {
             AdapterResult::Success { .. } => {
                 // Unexpected — means we got a real response
             }
+            AdapterResult::Unsupported { message, .. } => {
+                panic!("unexpected Unsupported result: {message}");
+            }
         }
     }
 

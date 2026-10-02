@@ -1,0 +1,17 @@
+[package]
+name = "runtime-visual"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+runtime-interaction = { path = "../runtime-interaction" }
+runtime-auth = { path = "../runtime-auth" }
+runtime-policy = { path = "../runtime-policy" }
+runtime-observability = { path = "../runtime-observability" }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+uuid = { workspace = true }

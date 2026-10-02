@@ -1592,6 +1592,7 @@ dependencies = [
  "runtime-observability",
  "runtime-policy",
  "runtime-sandbox",
+ "runtime-visual",
  "tokio",
  "uuid",
 ]
@@ -1607,10 +1608,13 @@ dependencies = [
  "metrics-util",
  "runtime-auth",
  "runtime-core",
+ "runtime-dom",
  "runtime-interaction",
+ "runtime-js",
  "runtime-observability",
  "runtime-policy",
  "runtime-sandbox",
+ "runtime-visual",
  "serde",
  "serde_json",
  "tempfile",
@@ -1761,6 +1765,20 @@ dependencies = [
  "serde",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "runtime-visual"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "runtime-auth",
+ "runtime-interaction",
+ "runtime-observability",
+ "runtime-policy",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

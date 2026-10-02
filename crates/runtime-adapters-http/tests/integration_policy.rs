@@ -55,6 +55,7 @@ async fn test_policy_denied_without_capability() {
         }
         AdapterResult::Success { .. } => panic!("agent without CapabilitySet should get Denied"),
         AdapterResult::Error { .. } => panic!("unexpected Error result"),
+        AdapterResult::Unsupported { .. } => panic!("unexpected Unsupported result"),
     };
 
     // Network NOT called → replay_sequence > 0 proves record_replay was invoked
@@ -100,6 +101,9 @@ async fn test_policy_allowed_with_capability() {
         }
         AdapterResult::Error { message, .. } => {
             panic!("unexpected Error result: {message}");
+        }
+        AdapterResult::Unsupported { message, .. } => {
+            panic!("unexpected Unsupported result: {message}");
         }
     };
 

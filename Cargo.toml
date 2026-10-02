@@ -16,6 +16,7 @@ members = [
     "crates/runtime-browser",
     "crates/runtime-agent",
     "crates/runtime-mcp",
+    "crates/runtime-visual",
 ]
 
 [workspace.package]

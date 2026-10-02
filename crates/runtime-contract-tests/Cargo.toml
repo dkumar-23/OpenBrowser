@@ -11,6 +11,9 @@ runtime-interaction = { path = "../runtime-interaction" }
 runtime-policy = { path = "../runtime-policy" }
 runtime-observability = { path = "../runtime-observability" }
 runtime-sandbox = { path = "../runtime-sandbox" }
+runtime-js = { path = "../runtime-js" }
+runtime-dom = { path = "../runtime-dom" }
+runtime-visual = { path = "../runtime-visual" }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 uuid = { workspace = true }
@@ -24,3 +27,6 @@ futures = { workspace = true }
 [dev-dependencies]
 metrics-util = "0.17"
 tempfile = "3"
+
+[features]
+v8 = ["runtime-js/v8"]

@@ -45,7 +45,8 @@ impl Scope {
 /// verbs (`http.post`, `http.put`, `http.patch`, `http.delete`) and the
 /// semantic authority-bearing actions `purchase`, `submit_form`,
 /// `authenticate`, `mcp.invoke`, and `schedule`. Read-class actions only
-/// observe: `http.get`, `search_web`, `extract_page`.
+/// observe: `http.get`, `search_web`, `extract_page`, and the visual fallback
+/// actions `visual.render` and `screenshot`.
 ///
 /// The registry is **default-deny**: an action that is not listed is
 /// unclassified (`None`), and `check_with_caps` refuses to authorize it. An
@@ -53,7 +54,9 @@ impl Scope {
 /// capability can never silently authorize an unknown mutation.
 fn required_scope(action: &str) -> Option<Scope> {
     match action {
-        "http.get" | "search_web" | "extract_page" => Some(Scope::Read),
+        "http.get" | "search_web" | "extract_page" | "visual.render" | "screenshot" => {
+            Some(Scope::Read)
+        }
         "http.post" | "http.put" | "http.patch" | "http.delete"
         | "purchase" | "submit_form" | "authenticate" | "mcp.invoke" | "schedule" => {
             Some(Scope::Write)

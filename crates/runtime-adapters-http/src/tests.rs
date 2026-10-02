@@ -65,6 +65,9 @@ mod tests {
             AdapterResult::Error { .. } => {
                 panic!("unexpected Error result: {:?}", result);
             }
+            AdapterResult::Unsupported { .. } => {
+                panic!("unexpected Unsupported result: {:?}", result);
+            }
         };
 
         // §6: replay event must have been recorded (sequence is assigned by writer)
@@ -117,6 +120,9 @@ mod tests {
             }
             AdapterResult::Error { message, .. } => {
                 panic!("unexpected Error result: {message}");
+            }
+            AdapterResult::Unsupported { message, .. } => {
+                panic!("unexpected Unsupported result: {message}");
             }
         };
 

@@ -36,6 +36,9 @@ pub enum AdapterParams {
     Dom { html: String, selector: String },
     /// JS execution in isolate.
     Js { source: String },
+    /// Visual fallback: render or screenshot. `action` is the explicit visual
+    /// action (`visual.render` / `screenshot`), `target` the subject.
+    Visual { action: String, target: String },
 }
 
 impl Default for AdapterParams {
@@ -53,6 +56,9 @@ pub enum AdapterResult {
     Success { response: String, replay_sequence: u64 },
     /// Adapter-level error (network failure, parse, etc.) — distinct from policy denial.
     Error { message: String, replay_sequence: u64 },
+    /// Feature is not available (e.g. no renderer configured). Graceful
+    /// failure — never a panic and never a policy bypass.
+    Unsupported { message: String, replay_sequence: u64 },
 }
 
 impl AdapterResult {
@@ -61,6 +67,7 @@ impl AdapterResult {
             AdapterResult::Denied { replay_sequence, .. } => *replay_sequence,
             AdapterResult::Success { replay_sequence, .. } => *replay_sequence,
             AdapterResult::Error { replay_sequence, .. } => *replay_sequence,
+            AdapterResult::Unsupported { replay_sequence, .. } => *replay_sequence,
         }
     }
 
@@ -73,6 +80,11 @@ impl AdapterResult {
     pub fn is_denied(&self) -> bool {
         matches!(self, AdapterResult::Denied { .. })
     }
+
+    /// Returns true if the requested feature is unsupported.
+    pub fn is_unsupported(&self) -> bool {
+        matches!(self, AdapterResult::Unsupported { .. })
+    }
 }
 
 /// Adapter identifier — supports adapter selection (HTTP > DOM > JS > MCP per context.md §11).
@@ -82,17 +94,20 @@ pub enum AdapterKind {
     Dom,
     Js,
     Mcp,
+    Visual,
 }
 
 impl AdapterKind {
-    /// Preference order: HTTP is preferred, then DOM, then JS, then MCP.
+    /// Preference order: HTTP is preferred, then DOM, then JS, then MCP, then
+    /// the Visual fallback last.
     /// Per context.md §11: agent should not need to understand mechanism.
-    pub fn preference_order() -> [Self; 4] {
+    pub fn preference_order() -> [Self; 5] {
         [
             AdapterKind::Http,
             AdapterKind::Dom,
             AdapterKind::Js,
             AdapterKind::Mcp,
+            AdapterKind::Visual,
         ]
     }
 }
@@ -132,6 +147,13 @@ pub trait InteractionAdapter: Send + Sync + std::fmt::Debug {
         self.descriptor().handles.iter().any(|h| h == action)
     }
 
+    /// Whether this adapter selects the given action. Defaults to `handles`.
+    /// Adapters may narrow selection (e.g. the visual fallback only selects
+    /// explicitly visual-required actions).
+    fn select(&self, action: &str) -> bool {
+        self.handles(action)
+    }
+
     /// Execute the action. MUST follow the contract above.
     async fn execute(
         &self,
@@ -149,7 +171,7 @@ pub fn select_adapter<'a>(
     action: &str,
 ) -> Option<&'a Box<dyn InteractionAdapter>> {
     for kind in AdapterKind::preference_order().iter() {
-        if let Some(a) = adapters.iter().find(|a| a.descriptor().kind == *kind && a.handles(action)) {
+        if let Some(a) = adapters.iter().find(|a| a.descriptor().kind == *kind && a.select(action)) {
             return Some(a);
         }
     }
@@ -243,6 +265,7 @@ mod tests {
         assert_eq!(order[1], AdapterKind::Dom);
         assert_eq!(order[2], AdapterKind::Js);
         assert_eq!(order[3], AdapterKind::Mcp);
+        assert_eq!(order[4], AdapterKind::Visual);
     }
 
     #[test]
@@ -268,6 +291,12 @@ mod tests {
         assert!(!error.is_success());
         assert!(!error.is_denied());
         assert_eq!(error.replay_sequence(), 3);
+
+        let unsupported = AdapterResult::Unsupported { message: "no renderer".into(), replay_sequence: 4 };
+        assert!(!unsupported.is_success());
+        assert!(!unsupported.is_denied());
+        assert!(unsupported.is_unsupported());
+        assert_eq!(unsupported.replay_sequence(), 4);
     }
 
     #[test]

@@ -11,6 +11,7 @@ runtime-auth = { path = "../runtime-auth" }
 runtime-policy = { path = "../runtime-policy" }
 runtime-adapters-http = { path = "../runtime-adapters-http" }
 runtime-mcp = { path = "../runtime-mcp" }
+runtime-visual = { path = "../runtime-visual" }
 runtime-observability = { path = "../runtime-observability" }
 runtime-interaction = { path = "../runtime-interaction" }
 runtime-sandbox = { path = "../runtime-sandbox" }
