@@ -15,7 +15,7 @@ async fn main() {
 
     // Wire kernel
     let observability: Arc<dyn Observability> = Arc::new(TraceObservability::default());
-    let mut policy_engine = PolicyEngine::new();
+    let mut policy_engine = PolicyEngine::new().with_observability(observability.clone());
     policy_engine.add_capability("http.get");
     policy_engine.add_capability("http.post");
     let policy = Arc::new(policy_engine);

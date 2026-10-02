@@ -342,12 +342,11 @@ mod tests {
     async fn worker_pool_spawn_enforces_quota() {
         let pool = WorkerPool::new();
 
-        // Spawning should succeed with default quota.
+        // Spawning should succeed with default quota (all-zero = unlimited).
         let handle = pool.spawn(Uuid::new_v4(), async {}).await;
         assert!(handle.is_ok(), "spawn should succeed under default quota");
 
-        // Spawn with a custom quota that starts at 0 requests — should succeed
-        // (usage starts at 0), but check_enforcement should fail immediately.
+        // A zero quota is unlimited: accumulating usage never breaches.
         let pool2 = WorkerPool::new();
         let quota_zero = ResourceQuota {
             max_memory_bytes: 0,
@@ -357,15 +356,32 @@ mod tests {
             max_requests: 0,
         };
         let id = Uuid::new_v4();
-        // With a zero quota, enforce() passes because usage starts at 0 (0 > 0 is false).
-        // Spawn succeeds; the quota only blocks when usage accumulates.
         let result = pool2.spawn_with_quota(id, quota_zero, async {}).await;
-        assert!(result.is_ok(), "spawn with zero quota should succeed (usage=0 at start)");
-        // But check_enforcement should immediately fail since any usage > 0 exceeds quota.
-        assert!(pool2.check_enforcement(id).await, "check_enforcement should pass initially (usage=0)");
-        // After adding any usage, zero quota should fail.
+        assert!(result.is_ok(), "spawn with zero quota should succeed");
+        assert!(pool2.check_enforcement(id).await, "zero quota is unlimited initially");
         pool2.add_usage(id, ResourceUsage { memory_bytes: 1, ..Default::default() }).await;
-        assert!(!pool2.check_enforcement(id).await, "check_enforcement should fail when usage > 0 and quota = 0");
+        assert!(
+            pool2.check_enforcement(id).await,
+            "zero quota must remain unlimited after usage accumulates"
+        );
+
+        // A nonzero quota is still enforced: exceeding it breaches.
+        let pool3 = WorkerPool::new();
+        let quota_nonzero = ResourceQuota {
+            max_memory_bytes: 100,
+            max_cpu_ms: 0,
+            max_wall_ms: 0,
+            max_network_bytes: 0,
+            max_requests: 0,
+        };
+        let id3 = Uuid::new_v4();
+        pool3.spawn_with_quota(id3, quota_nonzero, async {}).await.unwrap();
+        assert!(pool3.check_enforcement(id3).await, "usage under a nonzero quota must pass");
+        pool3.add_usage(id3, ResourceUsage { memory_bytes: 101, ..Default::default() }).await;
+        assert!(
+            !pool3.check_enforcement(id3).await,
+            "usage above a nonzero quota must breach"
+        );
     }
 
     #[tokio::test]

@@ -93,22 +93,37 @@ pub struct RuntimeKernel {
 }
 
 impl RuntimeKernel {
+    /// Compose the kernel around a policy engine and an observability sink.
+    ///
+    /// The caller must inject the same `observability` sink into the
+    /// `PolicyEngine` (via [`PolicyEngine::with_observability`]) when it
+    /// constructs it; only then do `policy_decision` lifecycle/replay events
+    /// and metrics reach the sink. The kernel wires the scheduler's
+    /// observability so `scheduler_queue_depth` gauges are emitted.
     pub fn new(policy: Arc<PolicyEngine>, observability: Arc<dyn Observability>) -> Self {
         let workers = Arc::new(WorkerPool::new());
         Self {
             scheduler: Scheduler::new(1000, 100) // max 1000 queued, 100 concurrent
-                .with_worker_pool(workers.clone()),
+                .with_worker_pool(workers.clone())
+                .with_observability(observability.clone()),
             workers,
             observability,
             policy,
         }
     }
 
-    /// Enforce capability check before any task submission. The decision is
-    /// routed through the decision log: a `policy_decision` lifecycle event
-    /// plus a `policy_decision` metric, via the injected Observability only.
-    pub fn check_capability(&self, agent: &AgentIdentity, action: &str) -> Decision {
-        let d = self.policy.check(agent, action);
+    /// Enforce a capability check before any task submission. The decision is
+    /// routed through the policy engine's capability-aware path
+    /// (`check_with_caps`), which logs exactly one `policy_decision` event to
+    /// the injected Observability sink. This method only adds a structured log
+    /// and never emits a second `policy_decision` event.
+    pub fn check_capability(
+        &self,
+        agent: &AgentIdentity,
+        caps: &runtime_policy::CapabilitySet,
+        action: &str,
+    ) -> Decision {
+        let d = self.policy.check_with_caps(agent, caps, action);
         self.observability.log_structured(
             runtime_observability::LogLevel::Info,
             &format!("policy_check: {}", action),
@@ -121,26 +136,6 @@ impl RuntimeKernel {
                 },
             ],
         );
-        let details = match &d {
-            runtime_policy::Decision::Allow => serde_json::json!({
-                "action": action,
-                "decision": "allow",
-            }),
-            runtime_policy::Decision::Deny { reason } => serde_json::json!({
-                "action": action,
-                "decision": "deny",
-                "reason": reason,
-            }),
-        };
-        self.observability.record_lifecycle(runtime_observability::LifecycleEvent {
-            task_id: Uuid::nil(),
-            agent_id: agent.agent_id.0,
-            delegation_id: None,
-            event_type: "policy_decision".into(),
-            timestamp: chrono::Utc::now(),
-            details: Some(details),
-        });
-        self.observability.metric("policy_decision", 1.0, &[("action", action)]);
         d
     }
 

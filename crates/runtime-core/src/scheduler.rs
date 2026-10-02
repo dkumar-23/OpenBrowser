@@ -412,8 +412,16 @@ impl Scheduler {
     }
 
     pub async fn submit(&self, task: TaskContext) -> Result<TaskHandle, BackpressureError> {
-        let global_permit = self.acquire_global()?;
+        // Acquire the local slot BEFORE global capacity: never hold a shared
+        // global permit while blocked on this scheduler's local queue.
         let permit = self.backpressure.acquire().await.map_err(|_| BackpressureError)?;
+        let global_permit = match self.acquire_global() {
+            Ok(p) => p,
+            Err(e) => {
+                drop(permit);
+                return Err(e);
+            }
+        };
         let (handle, envelope) = self.prepare(task, global_permit);
         if let Some(broker) = &self.broker {
             broker.push(envelope);
@@ -431,12 +439,20 @@ impl Scheduler {
     /// slot or the shared [`crate::broker::GlobalCapacity`] is exhausted it
     /// returns [`BackpressureError`] immediately instead of blocking.
     pub async fn try_submit(&self, task: TaskContext) -> Result<TaskHandle, BackpressureError> {
-        let global_permit = self.acquire_global()?;
+        // Local slot first, then global capacity — a global permit is never
+        // held while waiting on a local queue.
         let permit = self
             .backpressure
             .clone()
             .try_acquire_owned()
             .map_err(|_| BackpressureError)?;
+        let global_permit = match self.acquire_global() {
+            Ok(p) => p,
+            Err(e) => {
+                drop(permit);
+                return Err(e);
+            }
+        };
         let (handle, envelope) = self.prepare(task, global_permit);
         if let Some(broker) = &self.broker {
             broker.push(envelope);

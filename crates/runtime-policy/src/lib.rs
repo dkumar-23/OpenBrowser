@@ -218,28 +218,23 @@ impl PolicyEngine {
     }
 
     pub fn check_with_caps(&self, agent: &runtime_auth::AgentIdentity, caps: &CapabilitySet, action: &str) -> Decision {
-        let base = self.check(agent, action);
-        match base {
-            Decision::Allow => {
-                let decision = match required_scope(action) {
-                    Some(required) if caps.has_scoped(action, &required) => Decision::Allow,
-                    Some(_) => Decision::Deny {
-                        reason: format!("capability missing in agent CapabilitySet for {}", action),
-                    },
-                    None => Decision::Deny {
-                        reason: format!("unclassified action '{}': default-deny", action),
-                    },
-                };
-                // The base allow was already logged by `check`; when the
-                // per-agent capability scope check escalates to a denial,
-                // emit that denial too so lifecycle/replay/metric reflect it.
-                if matches!(decision, Decision::Deny { .. }) {
-                    self.log_decision(agent, action, &decision);
-                }
-                decision
-            }
+        let base = self.evaluate(agent, action);
+        let decision = match base {
+            Decision::Allow => match required_scope(action) {
+                Some(required) if caps.has_scoped(action, &required) => Decision::Allow,
+                Some(_) => Decision::Deny {
+                    reason: format!("capability missing in agent CapabilitySet for {}", action),
+                },
+                None => Decision::Deny {
+                    reason: format!("unclassified action '{}': default-deny", action),
+                },
+            },
             other => other,
-        }
+        };
+        // Exactly one decision is logged per evaluated action: the final
+        // decision (base evaluation combined with the per-agent scope check).
+        self.log_decision(agent, action, &decision);
+        decision
     }
 }
 

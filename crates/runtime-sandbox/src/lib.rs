@@ -1,11 +1,12 @@
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-/// Resource limits. A quota field of 0 means the corresponding usage limit
-/// is 0 (nothing) for passive `WorkerGuard::enforce` checks; the active
-/// mechanisms below (`Watchdog`, `OOMContainment`) treat 0 as "unlimited"
-/// and disarm themselves, matching existing `enforce()` behavior where
-/// zero usage never breaches a zero quota.
+/// Resource limits. A quota field of 0 means the corresponding limit is
+/// **unlimited** for every dimension: `WorkerGuard::enforce` skips a
+/// zero-valued quota field, and the active mechanisms below (`Watchdog`,
+/// `OOMContainment`) treat 0 as "unlimited" and disarm themselves. Nonzero
+/// limits are enforced as ceiling values (usage equal to the limit passes;
+/// usage above it breaches).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ResourceQuota {
     pub max_memory_bytes: u64,
@@ -53,13 +54,14 @@ impl WorkerGuard {
         self.breached_dimension().is_none()
     }
 
-    /// The first quota dimension currently breached, if any.
+    /// The first quota dimension currently breached, if any. A zero-valued
+    /// quota field is unlimited and is skipped.
     pub fn breached_dimension(&self) -> Option<&'static str> {
-        if self.usage.memory_bytes > self.quota.max_memory_bytes { return Some("memory"); }
-        if self.usage.cpu_ms > self.quota.max_cpu_ms { return Some("cpu"); }
-        if self.usage.wall_ms > self.quota.max_wall_ms { return Some("wall"); }
-        if self.usage.network_bytes > self.quota.max_network_bytes { return Some("network"); }
-        if self.usage.requests > self.quota.max_requests { return Some("requests"); }
+        if self.quota.max_memory_bytes != 0 && self.usage.memory_bytes > self.quota.max_memory_bytes { return Some("memory"); }
+        if self.quota.max_cpu_ms != 0 && self.usage.cpu_ms > self.quota.max_cpu_ms { return Some("cpu"); }
+        if self.quota.max_wall_ms != 0 && self.usage.wall_ms > self.quota.max_wall_ms { return Some("wall"); }
+        if self.quota.max_network_bytes != 0 && self.usage.network_bytes > self.quota.max_network_bytes { return Some("network"); }
+        if self.quota.max_requests != 0 && self.usage.requests > self.quota.max_requests { return Some("requests"); }
         None
     }
 }
